@@ -1,0 +1,15 @@
+[package]
+name = "pusher_client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures-util = { version = "0.3.31", features = ["tokio-io"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+tokio = { version = "1.45.0", features = ["full"] }
+tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+
+[dev-dependencies]
+dotenvy_macro = "0.15.7"
