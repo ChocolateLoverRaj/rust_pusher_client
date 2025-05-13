@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
-    tungstenite::{Message, protocol::CloseFrame},
+    tungstenite::{Message, Utf8Bytes, protocol::CloseFrame},
 };
 
 pub struct ConnectInput {
@@ -43,6 +43,18 @@ pub struct ConnectionInfo {
     activity_timeout: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PusherServerEvent {
+    event: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PusherClientEvent<T> {
+    event: String,
+    data: T,
+}
+
 pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, ConnectError> {
     let (web_socket, _response) = connect_async(format!(
         "wss://ws-{}.pusher.com/app/{}?protocol=7&client=Rust-{}?version={}",
@@ -54,11 +66,6 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
     .await
     .map_err(ConnectError::WebSocketConnectError)?;
     // Wait until we get the pusher:connection_established event
-    #[derive(Debug, Serialize, Deserialize)]
-    struct PusherEvent {
-        event: String,
-        data: String,
-    }
     let (mut write_stream, mut read_stream) = web_socket.split();
     let text = loop {
         let message = read_stream
@@ -83,8 +90,8 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
             Message::Frame(_) => unreachable!(),
         }
     };
-    let event =
-        serde_json::from_str::<PusherEvent>(text.as_str()).map_err(ConnectError::InvalidMessage)?;
+    let event = serde_json::from_str::<PusherServerEvent>(text.as_str())
+        .map_err(ConnectError::InvalidMessage)?;
     if event.event == "pusher:connection_established" {
         let event_data = serde_json::from_str::<ConnectionInfo>(&event.data)
             .map_err(ConnectError::InvalidEventData)?;
@@ -115,12 +122,22 @@ pub struct PusherClientConnection {
 pub enum KeepAliveError {
     #[error("WebSocket error when reading data")]
     WebSocketError(tokio_tungstenite::tungstenite::Error),
-    #[error("Received data from Pusher that was unexpected")]
-    UnexpectedData,
+    #[error("Received binary data from Pusher that was unexpected")]
+    UnexpectedBinaryData,
+    #[error("Received text data from Pusher that was unexpected")]
+    UnexpectedTextData(Utf8Bytes),
     #[error("Error sending a pong after receiving a ping from Pusher")]
     PongError(tokio_tungstenite::tungstenite::Error),
     #[error("WebSocket connection closed")]
     ConnectionClosed(Option<CloseFrame>),
+}
+
+#[derive(Debug, Error)]
+pub enum SubscribeError {
+    #[error("Error serializing JSON")]
+    SerializeError(serde_json::Error),
+    #[error("WebSocket error when reading data")]
+    WebSocketError(tokio_tungstenite::tungstenite::Error),
 }
 
 impl PusherClientConnection {
@@ -137,8 +154,11 @@ impl PusherClientConnection {
                 match self.read_stream.lock().await.next().await? {
                     Ok(message) => {
                         match message {
-                            Message::Binary(_) | Message::Text(_) => {
-                                Some((Err(KeepAliveError::UnexpectedData), false))
+                            Message::Binary(_) => {
+                                Some((Err(KeepAliveError::UnexpectedBinaryData), false))
+                            }
+                            Message::Text(text) => {
+                                Some((Err(KeepAliveError::UnexpectedTextData(text)), false))
                             }
                             Message::Ping(data) => {
                                 match self
@@ -154,7 +174,7 @@ impl PusherClientConnection {
                             }
                             Message::Pong(_) => {
                                 // We never sent a ping, so we shouldn't receive a pong
-                                Some((Err(KeepAliveError::UnexpectedData), false))
+                                Some((Err(KeepAliveError::UnexpectedBinaryData), false))
                             }
                             Message::Close(close_frame) => {
                                 Some((Err(KeepAliveError::ConnectionClosed(close_frame)), true))
@@ -167,4 +187,33 @@ impl PusherClientConnection {
             }
         })
     }
+
+    pub async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> Result<PusherClientConnectionSubscription, SubscribeError> {
+        #[derive(Debug, Serialize, Deserialize)]
+        struct PusherSubscribeEvent {
+            channel: String,
+        }
+        let event = PusherClientEvent {
+            event: "pusher:subscribe".into(),
+            data: PusherSubscribeEvent {
+                channel: channel.into(),
+            },
+        };
+        self.write_stream
+            .lock()
+            .await
+            .send(Message::Text(
+                serde_json::to_string(&event)
+                    .map_err(SubscribeError::SerializeError)?
+                    .into(),
+            ))
+            .await
+            .map_err(SubscribeError::WebSocketError)?;
+        Ok(PusherClientConnectionSubscription {})
+    }
 }
+
+pub struct PusherClientConnectionSubscription {}

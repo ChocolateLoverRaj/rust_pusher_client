@@ -10,6 +10,7 @@ pub async fn main() {
     })
     .await
     .unwrap();
+    connection.subscribe("my-channel").await.unwrap();
     println!("Connection info: {:?}", connection.connection_info());
     let s = connection.keep_alive();
     s.for_each(async |result| {
