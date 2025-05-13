@@ -1,10 +1,13 @@
-use std::cell::RefCell;
+use std::{cell::RefCell, rc::Rc};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{
+    SinkExt, Stream, StreamExt,
+    stream::{SplitSink, SplitStream},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_tungstenite::{
-    connect_async,
+    WebSocketStream, connect_async,
     tungstenite::{Message, protocol::CloseFrame},
 };
 
@@ -57,10 +60,9 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
         event: String,
         data: String,
     }
-    let (write, mut read) = web_socket.split();
-    let write = RefCell::new(write);
+    let (mut write_stream, mut read_stream) = web_socket.split();
     let text = loop {
-        let message = read
+        let message = read_stream
             .next()
             .await
             .ok_or(ConnectError::WebSocketStopped)?
@@ -69,8 +71,7 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
             Message::Text(text) => break text,
             Message::Binary(_) => return Err(ConnectError::UnexpectedData),
             Message::Ping(data) => {
-                write
-                    .borrow_mut()
+                write_stream
                     .send(Message::Pong(data))
                     .await
                     .map_err(ConnectError::PongError)?;
@@ -90,6 +91,8 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
             .map_err(ConnectError::InvalidEventData)?;
         Ok(PusherClientConnection {
             connection_info: event_data,
+            write_stream,
+            read_stream,
         })
     } else {
         Err(ConnectError::UnexpectedEvent(event.event))
@@ -98,10 +101,67 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
 
 pub struct PusherClientConnection {
     connection_info: ConnectionInfo,
+    write_stream: SplitSink<
+        WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        Message,
+    >,
+    read_stream:
+        SplitStream<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+}
+
+#[derive(Debug, Error)]
+pub enum KeepAliveError {
+    #[error("WebSocket error when reading data")]
+    WebSocketError(tokio_tungstenite::tungstenite::Error),
+    #[error("Received data from Pusher that was unexpected")]
+    UnexpectedData,
+    #[error("Error sending a pong after receiving a ping from Pusher")]
+    PongError(tokio_tungstenite::tungstenite::Error),
+    #[error("WebSocket connection closed")]
+    ConnectionClosed(Option<CloseFrame>),
 }
 
 impl PusherClientConnection {
     pub fn connection_info(&self) -> &ConnectionInfo {
         &self.connection_info
+    }
+
+    /// Keeps a connection alive by waiting for Ping messages from Pusher and responding with Pong messages. Pusher says that the client must also send a ping if no message was received from Pusher since a certain amount of time. This is not currently implemented by this stream. If the stream returns `None`, that means that you should assume that the connection is closed.
+    pub fn keep_alive(&mut self) -> impl Stream<Item = Result<(), KeepAliveError>> {
+        let connection = Rc::new(RefCell::new(self));
+        futures_util::stream::unfold(false, move |is_closed| {
+            let connection = connection.clone();
+            async move {
+                if is_closed {
+                    None
+                } else {
+                    let mut connection = connection.borrow_mut();
+                    match connection.read_stream.next().await? {
+                        Ok(message) => {
+                            match message {
+                                Message::Binary(_) | Message::Text(_) => {
+                                    Some((Err(KeepAliveError::UnexpectedData), false))
+                                }
+                                Message::Ping(data) => {
+                                    match connection.write_stream.send(Message::Pong(data)).await {
+                                        Ok(()) => Some((Ok(()), false)),
+                                        Err(e) => Some((Err(KeepAliveError::PongError(e)), false)),
+                                    }
+                                }
+                                Message::Pong(_) => {
+                                    // We never sent a ping, so we shouldn't receive a pong
+                                    Some((Err(KeepAliveError::UnexpectedData), false))
+                                }
+                                Message::Close(close_frame) => {
+                                    Some((Err(KeepAliveError::ConnectionClosed(close_frame)), true))
+                                }
+                                Message::Frame(_) => unreachable!(),
+                            }
+                        }
+                        Err(e) => Some((Err(KeepAliveError::WebSocketError(e)), false)),
+                    }
+                }
+            }
+        })
     }
 }
