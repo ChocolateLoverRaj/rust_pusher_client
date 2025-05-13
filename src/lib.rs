@@ -1,7 +1,6 @@
-use std::{cell::RefCell, rc::Rc};
-
 use futures_util::{
     SinkExt, Stream, StreamExt,
+    lock::Mutex,
     stream::{SplitSink, SplitStream},
 };
 use serde::{Deserialize, Serialize};
@@ -91,8 +90,8 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
             .map_err(ConnectError::InvalidEventData)?;
         Ok(PusherClientConnection {
             connection_info: event_data,
-            write_stream,
-            read_stream,
+            write_stream: Mutex::new(write_stream),
+            read_stream: Mutex::new(read_stream),
         })
     } else {
         Err(ConnectError::UnexpectedEvent(event.event))
@@ -101,12 +100,15 @@ pub async fn connect(input: ConnectInput) -> Result<PusherClientConnection, Conn
 
 pub struct PusherClientConnection {
     connection_info: ConnectionInfo,
-    write_stream: SplitSink<
-        WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-        Message,
+    write_stream: Mutex<
+        SplitSink<
+            WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            Message,
+        >,
     >,
-    read_stream:
+    read_stream: Mutex<
         SplitStream<WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+    >,
 }
 
 #[derive(Debug, Error)]
@@ -127,39 +129,40 @@ impl PusherClientConnection {
     }
 
     /// Keeps a connection alive by waiting for Ping messages from Pusher and responding with Pong messages. Pusher says that the client must also send a ping if no message was received from Pusher since a certain amount of time. This is not currently implemented by this stream. If the stream returns `None`, that means that you should assume that the connection is closed.
-    pub fn keep_alive(&mut self) -> impl Stream<Item = Result<(), KeepAliveError>> {
-        let connection = Rc::new(RefCell::new(self));
-        futures_util::stream::unfold(false, move |is_closed| {
-            let connection = connection.clone();
-            async move {
-                if is_closed {
-                    None
-                } else {
-                    let mut connection = connection.borrow_mut();
-                    match connection.read_stream.next().await? {
-                        Ok(message) => {
-                            match message {
-                                Message::Binary(_) | Message::Text(_) => {
-                                    Some((Err(KeepAliveError::UnexpectedData), false))
-                                }
-                                Message::Ping(data) => {
-                                    match connection.write_stream.send(Message::Pong(data)).await {
-                                        Ok(()) => Some((Ok(()), false)),
-                                        Err(e) => Some((Err(KeepAliveError::PongError(e)), false)),
-                                    }
-                                }
-                                Message::Pong(_) => {
-                                    // We never sent a ping, so we shouldn't receive a pong
-                                    Some((Err(KeepAliveError::UnexpectedData), false))
-                                }
-                                Message::Close(close_frame) => {
-                                    Some((Err(KeepAliveError::ConnectionClosed(close_frame)), true))
-                                }
-                                Message::Frame(_) => unreachable!(),
+    pub fn keep_alive(&self) -> impl Stream<Item = Result<(), KeepAliveError>> {
+        futures_util::stream::unfold(false, async |is_closed| {
+            if is_closed {
+                None
+            } else {
+                match self.read_stream.lock().await.next().await? {
+                    Ok(message) => {
+                        match message {
+                            Message::Binary(_) | Message::Text(_) => {
+                                Some((Err(KeepAliveError::UnexpectedData), false))
                             }
+                            Message::Ping(data) => {
+                                match self
+                                    .write_stream
+                                    .lock()
+                                    .await
+                                    .send(Message::Pong(data))
+                                    .await
+                                {
+                                    Ok(()) => Some((Ok(()), false)),
+                                    Err(e) => Some((Err(KeepAliveError::PongError(e)), false)),
+                                }
+                            }
+                            Message::Pong(_) => {
+                                // We never sent a ping, so we shouldn't receive a pong
+                                Some((Err(KeepAliveError::UnexpectedData), false))
+                            }
+                            Message::Close(close_frame) => {
+                                Some((Err(KeepAliveError::ConnectionClosed(close_frame)), true))
+                            }
+                            Message::Frame(_) => unreachable!(),
                         }
-                        Err(e) => Some((Err(KeepAliveError::WebSocketError(e)), false)),
                     }
+                    Err(e) => Some((Err(KeepAliveError::WebSocketError(e)), false)),
                 }
             }
         })

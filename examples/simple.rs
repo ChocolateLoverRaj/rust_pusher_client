@@ -4,7 +4,7 @@ use pusher_client::{ConnectInput, connect};
 
 #[tokio::main]
 pub async fn main() {
-    let mut connection = connect(ConnectInput {
+    let connection = connect(ConnectInput {
         cluster_name: dotenv!("PUSHER_CLUSTER_NAME").into(),
         key: dotenv!("PUSHER_KEY").into(),
     })
