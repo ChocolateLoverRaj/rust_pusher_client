@@ -1,4 +1,5 @@
 use dotenvy_macro::dotenv;
+use futures_util::StreamExt;
 use pusher_client::{ConnectInput, connect};
 use tokio::join;
 
@@ -11,13 +12,24 @@ pub async fn main() {
     .await
     .unwrap();
     println!("Connection info: {:?}", connection.connection_info());
-    let f1 = async {
-        println!("Subscribing to channel");
-        connection.subscribe("my-channel").await.unwrap();
+    let subscribe_and_print = async |channel: &str| {
+        println!("Subscribing to channel: {}", channel);
+        connection
+            .subscribe(channel)
+            .await
+            .unwrap()
+            .for_each(async |event| {
+                println!("{}: {:?}", channel, event);
+            })
+            .await;
     };
     let f2 = async {
         println!("Keeping connection alive and will panic if an error happens");
         connection_future.await.unwrap();
     };
-    join!(f1, f2);
+    join!(
+        subscribe_and_print("my-channel"),
+        subscribe_and_print("my-channel-2"),
+        f2
+    );
 }
