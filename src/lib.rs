@@ -208,8 +208,8 @@ pub async fn connect(
 
 #[derive(Debug)]
 pub struct UnexpectedEventError {
-    channel: String,
-    event: String,
+    pub channel: String,
+    pub event: String,
 }
 
 #[derive(Debug, Error)]
@@ -238,8 +238,8 @@ type SubscriptionSucceededChannels = Rc<Mutex<HashMap<String, tokio::sync::onesh
 
 #[derive(Debug)]
 pub struct ChannelCustomEvent {
-    event: String,
-    data: String,
+    pub event: String,
+    pub data: String,
 }
 
 type EventChannels =
@@ -274,6 +274,11 @@ pub enum SubscribeError {
     LibraryError,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PusherSubscribeEvent {
+    channel: String,
+}
+
 impl PusherClientConnection {
     pub fn connection_info(&self) -> &ConnectionInfo {
         &self.connection_info
@@ -283,10 +288,6 @@ impl PusherClientConnection {
         &self,
         channel: &str,
     ) -> Result<PusherClientConnectionSubscription, SubscribeError> {
-        #[derive(Debug, Serialize, Deserialize)]
-        struct PusherSubscribeEvent {
-            channel: String,
-        }
         let event = PusherClientEvent {
             event: "pusher:subscribe".into(),
             data: PusherSubscribeEvent {
@@ -314,24 +315,20 @@ impl PusherClientConnection {
             .await
             .map_err(|_| SubscribeError::LibraryError)?;
         Ok(PusherClientConnectionSubscription {
+            connection: self,
             channel: channel.into(),
             event_rx,
         })
     }
 }
 
-pub struct PusherClientConnectionSubscription {
+pub struct PusherClientConnectionSubscription<'a> {
+    connection: &'a PusherClientConnection,
     channel: String,
     event_rx: UnboundedReceiver<ChannelCustomEvent>,
 }
 
-// #[derive(Debug, Error)]
-// pub enum ReceiveEventError {
-//     #[error("Error in driver future")]
-//     LibraryError,
-// }
-
-impl Stream for PusherClientConnectionSubscription {
+impl Stream for PusherClientConnectionSubscription<'_> {
     type Item = ChannelCustomEvent;
 
     fn poll_next(
@@ -339,5 +336,27 @@ impl Stream for PusherClientConnectionSubscription {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         self.as_mut().event_rx.poll_recv(cx)
+    }
+}
+
+impl Drop for PusherClientConnectionSubscription<'_> {
+    fn drop(&mut self) {
+        // TODO: Force client of library to handle error instead of panicking. It's tricky when `Drop` though.
+        let event = PusherClientEvent {
+            event: "pusher:unsubscribe".into(),
+            data: PusherSubscribeEvent {
+                channel: self.channel.clone(),
+            },
+        };
+        self.connection
+            .send_queue
+            .send(Message::Text(
+                serde_json::to_string(&event)
+                    .map_err(SubscribeError::SerializeError)
+                    .unwrap()
+                    .into(),
+            ))
+            .map_err(|_| SubscribeError::LibraryError)
+            .unwrap();
     }
 }
