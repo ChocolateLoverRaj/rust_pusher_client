@@ -3,9 +3,12 @@ use std::{collections::HashMap, rc::Rc};
 use futures_util::{SinkExt, Stream, StreamExt, future::try_join, lock::Mutex};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, unbounded_channel},
-    oneshot,
+use tokio::{
+    sync::{
+        mpsc::{UnboundedReceiver, unbounded_channel},
+        oneshot, watch,
+    },
+    time::Instant,
 };
 use tokio_tungstenite::{
     connect_async,
@@ -111,6 +114,10 @@ pub async fn connect(
             let (send_queue_sender, mut receive_queue_receiver) = unbounded_channel();
             let event_handlers = SubscriptionSucceededChannels::default();
             let event_channels = EventChannels::default();
+            let (last_message_received_sender, last_message_received_receiver) = watch::channel({
+                // We just received pusher:connection_established so now makes sense
+                Instant::now()
+            });
             let future = {
                 // let error = error.clone();
                 let send_queue_sender = send_queue_sender.clone();
@@ -137,6 +144,7 @@ pub async fn connect(
                                         .await
                                         .ok_or(PusherClientError::StreamEnded)?
                                         .map_err(PusherClientError::WebSocketError)?;
+                                    let _ = last_message_received_sender.send(Instant::now());
                                     match message {
                                         Message::Binary(_) => {
                                             Err(PusherClientError::UnexpectedBinaryData)?;
@@ -198,6 +206,7 @@ pub async fn connect(
                     subscription_succeeded_channels: event_handlers,
                     event_channels,
                     send_queue: send_queue_sender,
+                    last_message_received: last_message_received_receiver,
                 },
             )
         })
@@ -250,6 +259,7 @@ pub struct PusherClientConnection {
     subscription_succeeded_channels: SubscriptionSucceededChannels,
     event_channels: EventChannels,
     send_queue: tokio::sync::mpsc::UnboundedSender<Message>,
+    last_message_received: tokio::sync::watch::Receiver<Instant>,
 }
 
 #[derive(Debug, Error)]
@@ -319,6 +329,10 @@ impl PusherClientConnection {
             channel: channel.into(),
             event_rx,
         })
+    }
+
+    pub fn last_message_received(&self) -> &tokio::sync::watch::Receiver<Instant> {
+        &self.last_message_received
     }
 }
 

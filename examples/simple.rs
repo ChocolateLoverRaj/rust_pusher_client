@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use pusher_client::{ConnectInput, connect};
 use tokio::{
     join,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout, timeout_at},
 };
 
 #[tokio::main]
@@ -62,10 +62,38 @@ pub async fn main() {
             .await;
         }
     };
+    let last_message_received_future = async {
+        let warning_threshold = Duration::from_secs(3);
+        let mut last_message_received = connection.last_message_received().clone();
+        loop {
+            let instant = connection.last_message_received().borrow().clone();
+            // println!("Last received: {:?}", instant);
+            // sleep(warning_threshold).await;
+            if let Err(_) = timeout_at(
+                instant.checked_add(warning_threshold).unwrap(),
+                last_message_received.changed(),
+            )
+            .await
+            {
+                println!(
+                    "Didn't receive a message in {:?}. Are we still connected?",
+                    warning_threshold
+                );
+                // Wait for a message until we check for disconnect again
+                last_message_received.changed().await.unwrap();
+                let difference = Instant::now().duration_since(instant);
+                println!(
+                    "Reconnected after being \"disconnected\" for {:?}",
+                    difference
+                );
+            }
+        }
+    };
     join!(
         driver_future,
         subscribe_and_print("my-channel", None),
         subscribe_and_print("my-channel-2", Some(2)),
-        on_off_future
+        on_off_future,
+        last_message_received_future
     );
 }
