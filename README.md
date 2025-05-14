@@ -12,3 +12,11 @@ This package will be available as `pusher_client` on crates.io.
 - Be `async`
 - Work on both web and native platforms. Currently it works on native only, but making it work on web is simply a matter of replacing the WebSocket library (help wanted). with a cross-platform one.
 - Nicely handle all errors instead of panicking
+
+## Status
+- [ ] Send pings to detect time since last message and if it gets disconnected
+- [x] Plain channels (subscribe, receive messages, unsubscribe)
+- [ ] Private channels
+- [ ] Presence channels
+- [ ] Encrypted channels
+- [ ] Client events
