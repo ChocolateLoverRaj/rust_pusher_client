@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::HashMap, rc::Rc, time::Duration};
 
 use futures_util::{SinkExt, Stream, StreamExt, future::try_join, lock::Mutex};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use tokio::{
         mpsc::{UnboundedReceiver, unbounded_channel},
         oneshot, watch,
     },
-    time::Instant,
+    time::{Instant, timeout, timeout_at},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -18,6 +18,10 @@ use tokio_tungstenite::{
 pub struct ConnectInput {
     pub cluster_name: String,
     pub key: String,
+    /// Duration since inactivity to send a ping to check that the connection still works
+    pub activity_timeout: Duration,
+    /// Duration after sending a ping after which it is assumed that the connection is disconnected
+    pub pong_timeout: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -126,10 +130,8 @@ pub async fn connect(
                 async move {
                     Err({
                         (async || -> Result<(), PusherClientError> {
-                            let future1 = async {
-                                while let Some(message) =
-                                    receive_queue_receiver.recv().await
-                                {
+                            let sender_future = async {
+                                while let Some(message) = receive_queue_receiver.recv().await {
                                     write_stream
                                         .send(message)
                                         .await
@@ -137,14 +139,45 @@ pub async fn connect(
                                 }
                                 Result::<_, PusherClientError>::Ok(())
                             };
-                            let future2 = async {
+                            let receiver_future = async {
                                 loop {
-                                    let message = read_stream
-                                        .next()
+                                    let message = {
+                                        let last_seen =
+                                            last_message_received_sender.borrow().clone();
+                                        match timeout_at(
+                                            last_seen.checked_add(input.activity_timeout).unwrap(),
+                                            read_stream.next(),
+                                        )
                                         .await
-                                        .ok_or(PusherClientError::StreamEnded)?
-                                        .map_err(PusherClientError::WebSocketError)?;
-                                    let _ = last_message_received_sender.send(Instant::now());
+                                        {
+                                            Ok(message) => {
+                                                let message = message
+                                                    .ok_or(PusherClientError::StreamEnded)?
+                                                    .map_err(PusherClientError::WebSocketError)?;
+                                                message
+                                            }
+                                            Err(_) => {
+                                                println!("Sending a ping");
+                                                send_queue_sender
+                                                    .send(Message::Ping(Default::default()))
+                                                    .map_err(|_| PusherClientError::LibraryError)?;
+                                                let message =
+                                                    timeout(input.pong_timeout, read_stream.next())
+                                                        .await
+                                                        .map_err(|_| {
+                                                            PusherClientError::PongTimeout
+                                                        })?
+                                                        .ok_or(PusherClientError::StreamEnded)?
+                                                        .map_err(
+                                                            PusherClientError::WebSocketError,
+                                                        )?;
+                                                message
+                                            }
+                                        }
+                                    };
+                                    last_message_received_sender
+                                        .send(Instant::now())
+                                        .map_err(|_| PusherClientError::LibraryError)?;
                                     match message {
                                         Message::Binary(_) => {
                                             Err(PusherClientError::UnexpectedBinaryData)?;
@@ -178,8 +211,9 @@ pub async fn connect(
                                                 send_queue_sender.send(Message::Pong(data));
                                         }
                                         Message::Pong(_) => {
-                                            // We never sent a ping, so we shouldn't receive a pong
-                                            Err(PusherClientError::UnexpectedBinaryData)?;
+                                            // We just use pong to know that the connection is still alive
+                                            // We already updated the last message received
+                                            // So no need to do anything here
                                         }
                                         Message::Close(close_frame) => {
                                             Err(PusherClientError::ConnectionClosed(
@@ -192,7 +226,7 @@ pub async fn connect(
                                 #[allow(unreachable_code)]
                                 Ok(())
                             };
-                            try_join(future1, future2).await.map(|_| ())
+                            try_join(sender_future, receiver_future).await.map(|_| ())
                         })()
                         .await
                         .unwrap_err()
@@ -241,6 +275,10 @@ pub enum PusherClientError {
     PongError(tokio_tungstenite::tungstenite::Error),
     #[error("WebSocket connection closed")]
     ConnectionClosed(Option<CloseFrame>),
+    #[error("This error happened because of a different error elsewhere")]
+    LibraryError,
+    #[error("This library sent a ping, but no pong was received from Pusher")]
+    PongTimeout,
 }
 
 type SubscriptionSucceededChannels = Rc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>;

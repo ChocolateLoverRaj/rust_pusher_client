@@ -14,9 +14,10 @@ This package will be available as `pusher_client` on crates.io.
 - Nicely handle all errors instead of panicking
 
 ## Status
-- [ ] Send pings to detect time since last message and if it gets disconnected
+- [x] Send pings to detect time since last message and if it gets disconnected
 - [x] Plain channels (subscribe, receive messages, unsubscribe)
 - [ ] Private channels
 - [ ] Presence channels
 - [ ] Encrypted channels
 - [ ] Client events
+- [ ] Reconnect internally

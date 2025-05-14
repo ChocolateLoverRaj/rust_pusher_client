@@ -13,6 +13,8 @@ pub async fn main() {
     let (connection_future, connection) = connect(ConnectInput {
         cluster_name: dotenv!("PUSHER_CLUSTER_NAME").into(),
         key: dotenv!("PUSHER_KEY").into(),
+        activity_timeout: Duration::from_secs(1),
+        pong_timeout: Duration::from_secs(30),
     })
     .await
     .unwrap();
