@@ -1,13 +1,14 @@
-use std::{collections::HashMap, rc::Rc, sync::atomic::{AtomicUsize, Ordering}, time::Duration};
+use std::{collections::HashMap, rc::Rc, sync::atomic::AtomicUsize, time::Duration};
 
 use futures_util::{
     future::try_join3, lock::Mutex, SinkExt, Stream, StreamExt
 };
 use serde::{Deserialize, Serialize};
+use subscription::PusherClientConnectionSubscription;
 use thiserror::Error;
 use tokio::{
     sync::{
-        mpsc::{self, UnboundedReceiver, error::TrySendError, unbounded_channel}, watch,
+        mpsc::{self, error::TrySendError, unbounded_channel}, watch,
     },
     time::{Instant, timeout, timeout_at},
 };
@@ -15,6 +16,8 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, protocol::CloseFrame},
 };
+
+mod subscription;
 
 pub struct Options {
     pub cluster_name: String,
@@ -387,49 +390,6 @@ impl PusherClientConnection {
         &self,
         channel: &str,
     ) -> impl Stream<Item = CustomEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let sender_id = self.subscribe_channel_id.fetch_add(1, Ordering::Relaxed);
-        self.subscribe_queue
-            .send(SubscribeData {
-                change: SubscriptionChange::Subscribe(sender_id, tx),
-                channel: channel.into(),
-            })
-            .unwrap();
-        PusherClientConnectionSubscription {
-            connection: self,
-            channel: channel.into(),
-            sender_id,
-            rx,
-        }
-    }
-}
-
-pub struct PusherClientConnectionSubscription<'a> {
-    connection: &'a PusherClientConnection,
-    channel: String,
-    sender_id: usize,
-    rx: UnboundedReceiver<CustomEvent>,
-}
-
-impl Stream for PusherClientConnectionSubscription<'_> {
-    type Item = CustomEvent;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.as_mut().rx.poll_recv(cx)
-    }
-}
-
-impl Drop for PusherClientConnectionSubscription<'_> {
-    fn drop(&mut self) {
-        self.connection
-            .subscribe_queue
-            .send(SubscribeData {
-                change: SubscriptionChange::Unsubscribe(self.sender_id),
-                channel: self.channel.clone(),
-            })
-            .unwrap();
+        PusherClientConnectionSubscription::new(self, channel)
     }
 }
