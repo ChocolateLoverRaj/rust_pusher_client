@@ -15,12 +15,15 @@ pub async fn main() {
         pong_timeout: Duration::from_secs(5),
     });
     let event_printer = async {
-        connection
-            .subscribe("my-channel")
-            .for_each(async |event| {
-                println!("{:?}", event);
-            })
-            .await;
+        let subscription = connection.subscribe("my-channel").await;
+        let status_printer =
+            WatchStream::new(subscription.status().to_owned()).for_each(async |status| {
+                println!("Subscription status: {:?}", status);
+            });
+        let event_printer = subscription.for_each(async |event| {
+            println!("{:?}", event);
+        });
+        join!(status_printer, event_printer);
     };
     let reconnect_future = async {
         connection.connect();
