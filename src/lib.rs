@@ -220,6 +220,7 @@ impl PusherClientConnection {
                                 }
                                 let connection_info = serde_json::from_str::<ConnectionInfo>(&event.data)
                                     .map_err(PusherClientError::JsonParseError)?;
+                                let pusher_requested_activity_timeout = Duration::from_secs(connection_info.activity_timeout);
                                 state_tx.send_replace(ConnectionState::Connected(connection_info));
                                 // Re-subscribe to every channel that has a subscription
                                 // TODO: Since we are not processing the subscribe channel, channels could get unnecessarily subscribed to and immediately unsubscribed from if the subscription unsubscribed while we were disconnected
@@ -245,7 +246,7 @@ impl PusherClientConnection {
                                     loop {
                                         let message = {
                                             match timeout_at(
-                                                last_message_received.checked_add(connection.options.activity_timeout).unwrap(),
+                                                last_message_received.checked_add(connection.options.activity_timeout.min(pusher_requested_activity_timeout)).unwrap(),
                                                 read_stream.next(),
                                             )
                                             .await
