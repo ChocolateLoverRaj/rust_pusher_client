@@ -7,6 +7,7 @@ use tokio::{
     join,
     time::{sleep, timeout},
 };
+use tokio_stream::wrappers::WatchStream;
 
 #[tokio::main]
 pub async fn main() {
@@ -64,18 +65,16 @@ pub async fn main() {
         }
     };
     let reconnect_future = async {
-        let mut state = connection.state().clone();
-        loop {
-            if let ConnectionState::NotConnected(state) = &*state.borrow() {
-                if let Some(error) = &state.error {
-                    println!("Error: {:?}", error);
+        connection.connect();
+        WatchStream::new(connection.state().clone())
+            .for_each(async |state| {
+                if let ConnectionState::NotConnected(_) = state {
+                    // Do not use up too much CPU from constantly failing
+                    sleep(Duration::from_secs(1)).await;
+                    connection.connect();
                 }
-                // Do not use up too much CPU from constantly failing
-                sleep(Duration::from_secs(1)).await;
-                connection.connect();
-            }
-            state.changed().await.unwrap();
-        }
+            })
+            .await;
     };
     join!(
         connection_future,

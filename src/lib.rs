@@ -1,4 +1,4 @@
-use std::{collections::HashMap, rc::Rc, sync::atomic::AtomicUsize, time::Duration};
+use std::{collections::HashMap, rc::Rc, sync::{atomic::AtomicUsize, Arc}, time::Duration};
 
 use futures_util::{
     future::{select, try_join3}, lock::Mutex, FutureExt, SinkExt, Stream, StreamExt
@@ -29,7 +29,7 @@ pub struct Options {
     pub pong_timeout: Duration,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ConnectionInfo {
     socket_id: String,
     activity_timeout: u64,
@@ -82,12 +82,12 @@ pub enum PusherClientError {
     PongTimeout,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct NotConnectedState {
-    pub error: Option<PusherClientError>,
+    pub error: Option<Arc<PusherClientError>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ConnectionState {
     NotConnected(NotConnectedState),
     Connecting,
@@ -377,7 +377,7 @@ impl PusherClientConnection {
                                 }.boxed_local()).await.factor_first().0
                             })().await.err();
                             state_tx.send_replace(ConnectionState::NotConnected(NotConnectedState {
-                                error,
+                                error: error.map(Arc::new),
                             }));
                             subscription_senders.get_mut().values_mut().for_each(|subscriptions| {
                                 if subscriptions.is_successfully_subscribed {
