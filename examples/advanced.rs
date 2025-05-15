@@ -2,10 +2,9 @@ use std::{ops::Deref, time::Duration};
 
 use dotenvy_macro::dotenv;
 use futures_util::StreamExt;
-use pusher_client::{ConnectionState, Options, PusherClientConnection};
+use pusher_client::{ConnectionState, Options, PusherClientConnection, SubscriptionEvent};
 use tokio::{
     join,
-    sync::Mutex,
     time::{sleep, timeout},
 };
 use tokio_stream::wrappers::WatchStream;
@@ -21,7 +20,7 @@ pub async fn main() {
 
     let subscribe_and_print = async |channel: &str, limit: Option<usize>| {
         println!("Subscribing to channel: {}", channel);
-        let mut subscription = connection.subscribe(channel).await;
+        let mut subscription = connection.subscribe(channel);
         let mut count = 0;
         loop {
             if let Some(limit) = limit {
@@ -31,9 +30,10 @@ pub async fn main() {
             }
             let event = subscription.next().await.unwrap();
             println!("{}: {:?}", channel, event);
-            count += 1;
+            if let SubscriptionEvent::Event(_) = event {
+                count += 1;
+            }
         }
-        subscription.unsubscribe().await;
     };
     // Demonstrates subscribing and unsubscribing
     let on_off_future = async {
@@ -46,22 +46,15 @@ pub async fn main() {
             );
             sleep(duration).await;
             println!("Receiving events on {} for {:?}", channel, duration);
-            let subscription = Mutex::new(Some(connection.subscribe(channel).await));
             let _ = timeout(duration, async {
-                let mut subscription = subscription.lock().await;
-                let subscription = subscription.as_mut().unwrap();
-                while let Some(event) = subscription.next().await {
-                    println!("{}: {:?}", channel, event);
-                }
+                connection
+                    .subscribe(channel)
+                    .for_each(async |event| {
+                        println!("{}: {:?}", channel, event);
+                    })
+                    .await
             })
             .await;
-            subscription
-                .lock()
-                .await
-                .take()
-                .unwrap()
-                .unsubscribe()
-                .await;
         }
     };
     let connection_state_future = async {

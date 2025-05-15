@@ -1,8 +1,10 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
     time::Duration,
+    usize,
 };
 
 use futures_util::{
@@ -108,17 +110,18 @@ struct PusherSubscribeEvent {
     channel: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CustomEventData {
     pub event: String,
     pub data: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum SubscriptionStatus {
+#[derive(Debug, Clone)]
+pub enum SubscriptionEvent {
     Connecting,
     SuccessfullySubscribed,
-    NotConnected,
+    Disconnected,
+    Event(CustomEventData),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,15 +130,18 @@ enum ConnectOperation {
     Disconnect,
 }
 
-enum SubscriptionsRefresh {
-    Subscribe(String),
-    Unsubscribe(String),
+enum SubscribeActionType {
+    Subscribe,
+    Unsubscribe,
 }
 
-struct Subscription {
-    status: watch::Sender<SubscriptionStatus>,
-    senders: HashMap<usize, mpsc::UnboundedSender<CustomEventData>>,
+struct SubscribeAction {
+    action_type: SubscribeActionType,
+    channel: String,
+    sender: Rc<mpsc::UnboundedSender<SubscriptionEvent>>,
 }
+
+type Subscription = Vec<Rc<mpsc::UnboundedSender<SubscriptionEvent>>>;
 
 type Subscriptions = Rc<Mutex<HashMap<String, Subscription>>>;
 
@@ -148,8 +154,8 @@ pub struct PusherClientConnection {
     // last_message_received: tokio::sync::watch::Receiver<Instant>,
     connect_queue: watch::Sender<Option<ConnectOperation>>,
     state: watch::Receiver<ConnectionState>,
-    subscriptions: Subscriptions,
-    subscriptions_refresh: mpsc::UnboundedSender<SubscriptionsRefresh>,
+    // subscriptions: Subscriptions,
+    subscribe_actions: mpsc::UnboundedSender<SubscribeAction>,
 }
 
 impl PusherClientConnection {
@@ -159,8 +165,7 @@ impl PusherClientConnection {
         let (connect_queue_tx, connect_queue_rx) = watch::channel(None);
         let (state_tx, state_rx) =
             watch::channel(ConnectionState::NotConnected(Default::default()));
-        let subscriptions = Subscriptions::default();
-        let (subscriptions_refresh_tx, mut subscriptions_refresh_rx) = mpsc::unbounded_channel();
+        let (subscribe_actions_tx, mut subscribe_actions_rx) = mpsc::unbounded_channel();
 
         let connection = Self {
             options: Rc::new(options),
@@ -169,19 +174,23 @@ impl PusherClientConnection {
             // send_queue: send_queue_sender.clone(),
             connect_queue: connect_queue_tx,
             state: state_rx,
-            subscriptions: subscriptions.clone(),
-            subscriptions_refresh: subscriptions_refresh_tx,
+            // subscriptions: subscriptions.clone(),
+            subscribe_actions: subscribe_actions_tx,
         };
         (
             {
                 let connection = connection.clone();
                 async move {
                     let mut connect_queue_rx = WatchStream::new(connect_queue_rx);
+                    let subscriptions = Subscriptions::default();
+                    // Includes channels that we've sent pusher:subscribe to
+                    let mut subscribed_channels = RefCell::<HashSet<String>>::default();
                     loop {
                         if let Some(ConnectOperation::Connect) =
                             connect_queue_rx.next().await.unwrap()
                         {
                             let error = (async || {
+                                let mut subscribed_channels = subscribed_channels.borrow_mut();
                                 let (send_queue_sender, mut receive_queue_receiver) = unbounded_channel();
                                 state_tx.send_replace(ConnectionState::Connecting);
                                 let (web_socket, _response) = connect_async(format!(
@@ -230,10 +239,8 @@ impl PusherClientConnection {
                                 let pusher_requested_activity_timeout = Duration::from_secs(connection_info.activity_timeout);
                                 state_tx.send_replace(ConnectionState::Connected(connection_info));
                                 let sender_future = async {
-                                    // Includes channels that we've sent pusher:subscribe to
-                                    let mut subscribed_channels = HashSet::<String>::default();
                                     // Re-subscribe to every channel that has a subscription
-                                    for (channel, subscription) in connection.subscriptions.lock().await.iter() {
+                                    for (channel, subscription) in subscriptions.lock().await.iter() {
                                         write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
                                             event: "pusher:subscribe".into(),
                                             data: PusherSubscribeEvent {
@@ -242,39 +249,64 @@ impl PusherClientConnection {
                                         }).unwrap().into())).await
                                         .map_err(PusherClientError::WebSocketError)?;
                                         subscribed_channels.insert(channel.clone());
-                                        subscription.status.send_replace(SubscriptionStatus::Connecting);
+                                        for sender in subscription {
+                                            sender.send(SubscriptionEvent::Connecting).unwrap()
+                                        }
                                     }
 
                                     loop {
-                                        match select(subscriptions_refresh_rx.recv().boxed_local(), receive_queue_receiver.recv().boxed_local()).await {
-                                        Either::Left((subscriptions_refresh, _)) => {
-                                            let subscriptions = subscriptions.lock().await;
-                                            match subscriptions_refresh.unwrap() {
-                                                SubscriptionsRefresh::Subscribe(channel) => {
-                                                    let subscription = subscriptions.get(&channel).unwrap();
-                                                    if !subscribed_channels.contains(&channel) {
-                                                        println!("Subscribing");
-                                                        write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
-                                                            event: "pusher:subscribe".into(),
-                                                            data: PusherSubscribeEvent {
-                                                                channel: channel.clone(),
-                                                            },
-                                                        }).unwrap().into())).await
-                                                        .map_err(PusherClientError::WebSocketError)?;
-                                                        subscribed_channels.insert(channel);
-                                                        subscription.status.send_replace(SubscriptionStatus::Connecting);
+                                        match select(async {
+                                            let mut subscribe_actions = Vec::default();
+                                            subscribe_actions_rx.recv_many(&mut subscribe_actions, usize::MAX).await; subscribe_actions }.boxed_local(), receive_queue_receiver.recv().boxed_local()).await {
+                                        Either::Left((subscribe_actions, _)) => {
+                                            let mut subscriptions = subscriptions.lock().await;
+
+                                            // Update senders
+                                            for subscribe_action in subscribe_actions {
+                                                match subscribe_action.action_type {
+                                                    SubscribeActionType::Subscribe => {
+                                                        let subscription = subscriptions.entry(subscribe_action.channel.clone()).or_insert(Default::default());
+                                                        let channel_key = subscription.len();
+                                                        subscription.insert(channel_key, subscribe_action.sender);
+                                                    },
+                                                    SubscribeActionType::Unsubscribe => {
+                                                        let subscription = subscriptions.get_mut(&subscribe_action.channel).unwrap();
+                                                        subscription.swap_remove(subscription
+                                                            .iter()
+                                                            .position(|sender|
+                                                                Rc::ptr_eq(sender, &subscribe_action.sender)).unwrap());
+                                                        if subscription.is_empty() {
+                                                            subscriptions.remove(&subscribe_action.channel);
+                                                        }
                                                     }
-                                                },
-                                                SubscriptionsRefresh::Unsubscribe(channel) => {
-                                                    if !subscriptions.contains_key(&channel) {
-                                                        write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
-                                                            event: "pusher:unsubscribe".into(),
-                                                            data: PusherSubscribeEvent {
-                                                                channel: channel.clone(),
-                                                            },
-                                                        }).unwrap().into())).await
-                                                        .map_err(PusherClientError::WebSocketError)?;
-                                                        subscribed_channels.remove(&channel);
+                                                }
+                                            }
+
+                                            // Actually subscribe / unsubscribe
+                                            for subscribed_channel in subscribed_channels.clone() {
+                                                if !subscriptions.contains_key(&subscribed_channel) {
+                                                    subscribed_channels.remove(&subscribed_channel);
+                                                    write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
+                                                        event: "pusher:unsubscribe".into(),
+                                                        data: PusherSubscribeEvent {
+                                                            channel: subscribed_channel,
+                                                        },
+                                                    }).unwrap().into())).await
+                                                    .map_err(PusherClientError::WebSocketError)?;
+                                                }
+                                            }
+                                            for (channel, subscription) in subscriptions.iter() {
+                                                if !subscribed_channels.contains(channel) {
+                                                    write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
+                                                        event: "pusher:subscribe".into(),
+                                                        data: PusherSubscribeEvent {
+                                                            channel: channel.clone(),
+                                                        },
+                                                    }).unwrap().into())).await
+                                                    .map_err(PusherClientError::WebSocketError)?;
+                                                    subscribed_channels.insert(channel.to_owned());
+                                                    for sender in subscription {
+                                                        sender.send(SubscriptionEvent::Connecting).unwrap();
                                                     }
                                                 }
                                             }
@@ -343,14 +375,17 @@ impl PusherClientConnection {
                                                     let channel = event.channel.ok_or(PusherClientError::ParseError)?;
                                                     // println!("Successfully subscribed to {:?}", channel);
                                                     if let Some(subscription) = subscriptions.lock().await.get(&channel) {
-                                                        subscription.status.send_replace(SubscriptionStatus::SuccessfullySubscribed);
+                                                        for sender in subscription {
+                                                            sender.send(SubscriptionEvent::SuccessfullySubscribed).unwrap();
+                                                        }
                                                     }
                                                 } else {
                                                     let channel = event.channel.ok_or(PusherClientError::ParseError)?;
                                                     // println!("Event on channel: {:?}", channel);
                                                     if let Some(subscription) = subscriptions.lock().await.get_mut(&channel) {
-                                                        subscription.senders.values()
-                                                            .for_each(|sender| sender.send(CustomEventData { event: event.event.clone(), data: event.data.clone() }).unwrap());
+                                                        subscription
+                                                            .iter()
+                                                            .for_each(|sender| sender.send(SubscriptionEvent::Event(CustomEventData { event: event.event.clone(), data: event.data.clone() })).unwrap());
                                                     }
                                                 }
                                             }
@@ -395,15 +430,13 @@ impl PusherClientConnection {
                                     error: error.map(Arc::new),
                                 },
                             ));
-                            subscriptions
-                                .lock()
-                                .await
-                                .values_mut()
-                                .for_each(|subscription| {
-                                    subscription
-                                        .status
-                                        .send_replace(SubscriptionStatus::NotConnected);
-                                });
+                            for subscribed_channel in subscribed_channels.get_mut().drain() {
+                                for sender in
+                                    subscriptions.lock().await.get(&subscribed_channel).unwrap()
+                                {
+                                    sender.send(SubscriptionEvent::Disconnected).unwrap();
+                                }
+                            }
                         }
                     }
                 }
@@ -426,7 +459,7 @@ impl PusherClientConnection {
             .send_replace(Some(ConnectOperation::Disconnect));
     }
 
-    pub async fn subscribe(&self, channel: &str) -> PusherClientConnectionSubscription {
-        PusherClientConnectionSubscription::new(self, channel).await
+    pub fn subscribe(&self, channel: &str) -> PusherClientConnectionSubscription {
+        PusherClientConnectionSubscription::new(self, channel)
     }
 }
