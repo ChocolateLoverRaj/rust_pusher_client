@@ -20,4 +20,4 @@ This package will be available as `pusher_client` on crates.io.
 - [ ] Presence channels
 - [ ] Encrypted channels
 - [ ] Client events
-- [x] Disconnect and reconnect gracefully
+- [x] Disconnect and reconnect gracefully (on an error, connection lost, or if app wants to disconnect)
