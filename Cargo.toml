@@ -4,13 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-futures-util = { version = "0.3.31", features = ["tokio-io"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-thiserror = "2.0.12"
-tokio = { version = "1.45.0", features = ["full"] }
-tokio-stream = { version = "0.1.17", features = ["sync"] }
+futures-util = { version = "0.3.31", default-features = false }
+serde = { version = "1.0.219", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.140", default-features = false, features = [
+    "alloc",
+] }
+thiserror = { version = "2.0.12", default-features = false }
+tokio = { version = "1.45.0", features = ["time"] }
+tokio-stream = { version = "0.1.17", default-features = false, features = [
+    "sync",
+] }
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 
 [dev-dependencies]
 dotenvy_macro = "0.15.7"
+
+[features]
+std = ["tokio/macros", "tokio/rt-multi-thread"]
+default = ["std"]
