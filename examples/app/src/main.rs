@@ -7,7 +7,7 @@ use fluvio_wasm_timer::Delay;
 use iced::Task;
 use iced::futures::lock::Mutex;
 use iced::futures::stream::{once, unfold};
-use iced::widget::text;
+use iced::widget::{button, column, text};
 use iced::{Element, Subscription, Theme};
 use pusher_client::{ConnectionState, Options, PusherClientConnection};
 
@@ -35,7 +35,8 @@ enum Message {
     Initial,
     Unreachable,
     ConnectionStateChange,
-    ShouldReconnect,
+    Disconnect,
+    Connect,
 }
 
 impl App {
@@ -71,17 +72,27 @@ impl App {
             }
             Message::ConnectionStateChange => {
                 let connection = self.connection.as_ref().unwrap();
-                if let ConnectionState::NotConnected(_) = connection.state().borrow().deref() {
-                    // Do not use up too much CPU from constantly failing
-                    Task::run(once(Delay::new(Duration::from_secs(1))), |_| {
-                        Message::ShouldReconnect
-                    })
+                if let ConnectionState::NotConnected(not_connected_state) =
+                    connection.state().borrow().deref()
+                {
+                    if let Some(_error) = &not_connected_state.error {
+                        // Do not use up too much CPU from constantly failing
+                        Task::run(once(Delay::new(Duration::from_secs(1))), |_| {
+                            Message::Connect
+                        })
+                    } else {
+                        Task::none()
+                    }
                 } else {
                     Task::none()
                 }
             }
-            Message::ShouldReconnect => {
+            Message::Connect => {
                 self.connection.as_ref().unwrap().connect();
+                Task::none()
+            }
+            Message::Disconnect => {
+                self.connection.as_ref().unwrap().disconnect();
                 Task::none()
             }
         }
@@ -92,14 +103,39 @@ impl App {
     }
 
     fn view(&self) -> Element<Message> {
-        text(format!(
+        let mut elements = Vec::from_iter([text(format!(
             "Connection status: {:#?}",
             self.connection
                 .as_ref()
                 .map(|connection| connection.state().borrow())
                 .as_deref()
         ))
-        .into()
+        .into()]);
+        if let Some(connection) = self.connection.as_ref() {
+            match connection.state().borrow().deref() {
+                ConnectionState::Connected(_) => {
+                    elements.push(
+                        button("Disconnect")
+                            .style(button::danger)
+                            .on_press(Message::Disconnect)
+                            .into(),
+                    );
+                }
+                ConnectionState::Disconnecting => {
+                    elements.push(button("Disconnecting").style(button::danger).into());
+                }
+                ConnectionState::NotConnected(_) => {
+                    elements.push(
+                        button("Connect")
+                            .style(button::primary)
+                            .on_press(Message::Connect)
+                            .into(),
+                    );
+                }
+                ConnectionState::Connecting => {}
+            }
+        }
+        column(elements).into()
     }
 
     fn theme(&self) -> Theme {
