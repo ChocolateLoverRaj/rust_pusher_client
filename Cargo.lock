@@ -2131,6 +2131,7 @@ dependencies = [
 [[package]]
 name = "nash-ws"
 version = "0.3.1-alpha.0"
+source = "git+https://github.com/ChocolateLoverRaj/nash-ws?branch=async-mutex#f64471b765abb5ec50f9fd607ab8022bf6ae865f"
 dependencies = [
  "async-channel 1.9.0",
  "derivative",

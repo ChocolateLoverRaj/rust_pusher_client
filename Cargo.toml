@@ -12,7 +12,7 @@ futures-util = { version = "0.3.31", default-features = false, features = [
     "alloc",
 ] }
 iced_futures = { version = "0.13.2", default-features = false }
-nash-ws = { path = "../nash-ws" }
+nash-ws = { git = "https://github.com/ChocolateLoverRaj/nash-ws", branch = "async-mutex" }
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.140", default-features = false, features = [
     "alloc",
