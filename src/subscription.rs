@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 
 use futures_util::Stream;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -8,14 +8,14 @@ use crate::{PusherClientConnection, SubscribeAction, SubscribeActionType, Subscr
 pub struct PusherClientConnectionSubscription<'a> {
     connection: &'a PusherClientConnection,
     channel: String,
-    sender: Rc<mpsc::UnboundedSender<SubscriptionEvent>>,
+    sender: Arc<mpsc::UnboundedSender<SubscriptionEvent>>,
     receiver: UnboundedReceiver<SubscriptionEvent>,
 }
 
 impl<'a> PusherClientConnectionSubscription<'a> {
     pub(crate) fn new(connection: &'a PusherClientConnection, channel: &str) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let sender = Rc::new(sender);
+        let sender = Arc::new(sender);
         connection
             .subscribe_actions
             .send(SubscribeAction {

@@ -1,8 +1,6 @@
 {
-  description = "A devShell example";
-
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
   };
@@ -21,21 +19,33 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
+
+        buildInputs = with pkgs; [
+          expat
+          fontconfig
+          freetype
+          freetype.dev
+          libGL
+          pkg-config
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXi
+          xorg.libXrandr
+          wayland
+          libxkbcommon
+          (rust-bin.stable.latest.default.override {
+            extensions = [ "rust-src" ];
+            targets = [ "wasm32-unknown-unknown" ];
+          })
+          trunk
+        ];
       in
       {
-        devShells.default =
-          with pkgs;
-          mkShell {
-            buildInputs = [
-              openssl
-              pkg-config
-              (rust-bin.stable.latest.default.override {
-                extensions = [ "rust-src" ];
-                targets = [ "wasm32-unknown-unknown" ];
-              })
-              rust-analyzer
-            ];
-          };
+        devShells.default = pkgs.mkShell {
+          inherit buildInputs;
+
+          LD_LIBRARY_PATH = builtins.foldl' (a: b: "${a}:${b}/lib") "${pkgs.vulkan-loader}/lib" buildInputs;
+        };
       }
     );
 }

@@ -1,23 +1,22 @@
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
-    rc::Rc,
     sync::Arc,
     time::Duration,
     usize,
 };
 
+use fluvio_wasm_timer::Delay;
 use futures_util::{
     FutureExt, StreamExt,
     future::{Either, select},
 };
+use iced_futures::MaybeSend;
 use nash_ws::{Message, WebSocket};
 use serde::{Deserialize, Serialize};
 use subscription::PusherClientConnectionSubscription;
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, mpsc, watch},
-    time::{Instant, timeout, timeout_at},
     try_join,
 };
 use tokio_stream::wrappers::WatchStream;
@@ -48,7 +47,8 @@ struct PusherServerEvent {
 #[derive(Debug, Serialize, Deserialize)]
 struct PusherClientEvent<T> {
     event: String,
-    data: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<T>,
 }
 
 #[derive(Debug)]
@@ -130,28 +130,23 @@ enum SubscribeActionType {
 struct SubscribeAction {
     action_type: SubscribeActionType,
     channel: String,
-    sender: Rc<mpsc::UnboundedSender<SubscriptionEvent>>,
+    sender: Arc<mpsc::UnboundedSender<SubscriptionEvent>>,
 }
 
-type Subscription = Vec<Rc<mpsc::UnboundedSender<SubscriptionEvent>>>;
+type Subscription = Vec<Arc<mpsc::UnboundedSender<SubscriptionEvent>>>;
 
-type Subscriptions = Rc<Mutex<HashMap<String, Subscription>>>;
+type Subscriptions = Arc<Mutex<HashMap<String, Subscription>>>;
 
 #[derive(Clone)]
 pub struct PusherClientConnection {
-    options: Rc<Options>,
-    // subscription_succeeded_channels: SubscriptionSucceededChannels,
-    // event_channels: EventChannels,
-    // send_queue: tokio::sync::mpsc::UnboundedSender<Message>,
-    // last_message_received: tokio::sync::watch::Receiver<Instant>,
+    options: Arc<Options>,
     connect_queue: watch::Sender<Option<ConnectOperation>>,
     state: watch::Receiver<ConnectionState>,
-    // subscriptions: Subscriptions,
     subscribe_actions: mpsc::UnboundedSender<SubscribeAction>,
 }
 
 impl PusherClientConnection {
-    pub fn new(options: Options) -> (impl Future<Output = ()>, Self) {
+    pub fn new(options: Options) -> (impl Future<Output = ()> + MaybeSend, Self) {
         // let subscription_succeeded_channels = SubscriptionSucceededChannels::default();
         // let event_channels = EventChannels::default();
         let (connect_queue_tx, connect_queue_rx) = watch::channel(None);
@@ -160,7 +155,7 @@ impl PusherClientConnection {
         let (subscribe_actions_tx, mut subscribe_actions_rx) = mpsc::unbounded_channel();
 
         let connection = Self {
-            options: Rc::new(options),
+            options: Arc::new(options),
             // event_channels: event_channels.clone(),
             // subscription_succeeded_channels: subscription_succeeded_channels.clone(),
             // send_queue: send_queue_sender.clone(),
@@ -176,14 +171,14 @@ impl PusherClientConnection {
                     let mut connect_queue_rx = WatchStream::new(connect_queue_rx);
                     let subscriptions = Subscriptions::default();
                     // Includes channels that we've sent pusher:subscribe to
-                    let mut subscribed_channels = RefCell::<HashSet<String>>::default();
+                    let mut subscribed_channels = Mutex::<HashSet<String>>::default();
                     loop {
                         if let Some(ConnectOperation::Connect) =
                             connect_queue_rx.next().await.unwrap()
                         {
                             let error = (async || {
-                                let mut subscribed_channels = subscribed_channels.borrow_mut();
-                                let (ping_sender, mut ping_receiver) = mpsc::channel(1);
+                                let mut subscribed_channels = subscribed_channels.lock().await;
+                                let (ping_sender, mut ping_receiver) = mpsc::channel::<()>(1);
                                 state_tx.send_replace(ConnectionState::Connecting);
                                 let (mut write_stream, mut read_stream) = WebSocket::new(&format!(
                                     "wss://ws-{}.pusher.com/app/{}?protocol=7&client=Rust-{}?version={}",
@@ -234,9 +229,9 @@ impl PusherClientConnection {
                                     for (channel, subscription) in subscriptions.lock().await.iter() {
                                         write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                             event: "pusher:subscribe".into(),
-                                            data: PusherSubscribeEvent {
+                                            data: Some(PusherSubscribeEvent {
                                                 channel: channel.clone(),
-                                            },
+                                            }),
                                         }).unwrap().into())).await
                                         .map_err(PusherClientError::WebSocketError)?;
                                         subscribed_channels.insert(channel.clone());
@@ -246,9 +241,9 @@ impl PusherClientConnection {
                                     }
 
                                     loop {
-                                        match select(async {
+                                        match select(Box::pin(async {
                                             let mut subscribe_actions = Vec::default();
-                                            subscribe_actions_rx.recv_many(&mut subscribe_actions, usize::MAX).await; subscribe_actions }.boxed_local(), ping_receiver.recv().boxed_local()).await {
+                                            subscribe_actions_rx.recv_many(&mut subscribe_actions, usize::MAX).await; subscribe_actions }), ping_receiver.recv().boxed()).await {
                                         Either::Left((subscribe_actions, _)) => {
                                             let mut subscriptions = subscriptions.lock().await;
 
@@ -265,7 +260,7 @@ impl PusherClientConnection {
                                                         subscription.swap_remove(subscription
                                                             .iter()
                                                             .position(|sender|
-                                                                Rc::ptr_eq(sender, &subscribe_action.sender)).unwrap());
+                                                                Arc::ptr_eq(sender, &subscribe_action.sender)).unwrap());
                                                         if subscription.is_empty() {
                                                             subscriptions.remove(&subscribe_action.channel);
                                                         }
@@ -279,9 +274,9 @@ impl PusherClientConnection {
                                                     subscribed_channels.remove(&subscribed_channel);
                                                     write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                                         event: "pusher:unsubscribe".into(),
-                                                        data: PusherSubscribeEvent {
+                                                        data: Some(PusherSubscribeEvent {
                                                             channel: subscribed_channel,
-                                                        },
+                                                        }),
                                                     }).unwrap().into())).await
                                                     .map_err(PusherClientError::WebSocketError)?;
                                                 }
@@ -290,9 +285,9 @@ impl PusherClientConnection {
                                                 if !subscribed_channels.contains(channel) {
                                                     write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                                         event: "pusher:subscribe".into(),
-                                                        data: PusherSubscribeEvent {
+                                                        data: Some(PusherSubscribeEvent {
                                                             channel: channel.clone(),
-                                                        },
+                                                        }),
                                                     }).unwrap().into())).await
                                                     .map_err(PusherClientError::WebSocketError)?;
                                                     subscribed_channels.insert(channel.to_owned());
@@ -306,7 +301,7 @@ impl PusherClientConnection {
                                             write_stream
                                                 .send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                                     event: "pusher:ping".into(),
-                                                    data: ()
+                                                    data: None::<()>
                                                 }).unwrap()))
                                                 .await
                                                 .map_err(PusherClientError::WebSocketError)?;
@@ -317,41 +312,45 @@ impl PusherClientConnection {
                                     Ok::<_, PusherClientError>(())
                                 };
                                 let receiver_future = async {
-                                    let mut last_message_received = Instant::now();
+                                    let mut last_message_received = fluvio_wasm_timer::Instant::now();
                                     loop {
                                         let message = {
-                                            match timeout_at(
-                                                last_message_received.checked_add(connection.options.activity_timeout.min(pusher_requested_activity_timeout)).unwrap(),
-                                                read_stream.next(),
+                                            match select(
+                                                Delay::new_at(last_message_received + connection.options.activity_timeout.min(pusher_requested_activity_timeout)),
+                                                Box::pin(read_stream.next()),
                                             )
                                             .await
                                             {
-                                                Ok(message) => {
+                                                Either::Right((message, _)) => {
                                                     let message = message
                                                         .ok_or(PusherClientError::StreamEnded)?
                                                         .map_err(PusherClientError::WebSocketError)?;
                                                     message
                                                 }
-                                                Err(_) => {
+                                                Either::Left((_, read_stream_next)) => {
                                                     // println!("Sending a ping");
                                                     ping_sender
                                                         .try_send(())
                                                         .map_err(|_| PusherClientError::LibraryError)?;
-                                                    let message =
-                                                        timeout(connection.options.pong_timeout, read_stream.next())
-                                                            .await
-                                                            .map_err(|_| {
-                                                                PusherClientError::PongTimeout
-                                                            })?
-                                                            .ok_or(PusherClientError::StreamEnded)?
-                                                            .map_err(
-                                                                PusherClientError::WebSocketError,
-                                                            )?;
+                                                    let message = match select(Delay::new(connection.options.pong_timeout), read_stream_next)
+                                                            .await {
+                                                        Either::Left(_) => {
+                                                            Err(PusherClientError::PongTimeout)
+                                                        },
+                                                        Either::Right((message, _)) => {
+                                                            Ok(message
+                                                                .ok_or(PusherClientError::StreamEnded)?
+                                                                .map_err(
+                                                                    PusherClientError::WebSocketError,
+                                                                )?)
+                                                        }
+                                                    }?;
+                                                            
                                                     message
                                                 }
                                             }
                                         };
-                                        last_message_received = Instant::now();
+                                        last_message_received = fluvio_wasm_timer::Instant::now();
                                         match message {
                                             Message::Binary(_) => {
                                                 Err(PusherClientError::UnexpectedBinaryData)?;
@@ -417,11 +416,11 @@ impl PusherClientConnection {
                                             }
                                         }
                                         Ok(())
-                                    }.boxed_local(),
-                                    async {
+                                    }.boxed(),
+                                    Box::pin(async {
                                     try_join!(sender_future, receiver_future)?;
                                     Ok::<_, PusherClientError>(())
-                                }.boxed_local()).await.factor_first().0
+                                })).await.factor_first().0
                             })().await.err();
                             state_tx.send_replace(ConnectionState::NotConnected(
                                 NotConnectedState {
