@@ -8,27 +8,19 @@ use std::{
 };
 
 use futures_util::{
-    FutureExt, SinkExt, StreamExt,
+    FutureExt, StreamExt,
     future::{Either, select},
-    lock::Mutex,
 };
+use nash_ws::{Message, WebSocket};
 use serde::{Deserialize, Serialize};
 use subscription::PusherClientConnectionSubscription;
 use thiserror::Error;
 use tokio::{
-    sync::{
-        mpsc::{self, unbounded_channel},
-        watch,
-    },
+    sync::{Mutex, mpsc, watch},
     time::{Instant, timeout, timeout_at},
     try_join,
 };
 use tokio_stream::wrappers::WatchStream;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{Message, protocol::CloseFrame},
-};
-
 pub mod subscription;
 
 pub struct Options {
@@ -70,7 +62,7 @@ pub enum PusherClientError {
     #[error("The WebSocket read stream ended")]
     StreamEnded,
     #[error("WebSocket error when reading data")]
-    WebSocketError(tokio_tungstenite::tungstenite::Error),
+    WebSocketError(nash_ws::Error),
     #[error("Received binary data from Pusher that was unexpected")]
     UnexpectedBinaryData,
     #[error("Received a pong when we shouldn't've received one")]
@@ -84,9 +76,9 @@ pub enum PusherClientError {
     #[error("Received an unexpected custom event")]
     UnexpectedEvent(UnexpectedEventError),
     #[error("Error sending a pong after receiving a ping from Pusher")]
-    PongError(tokio_tungstenite::tungstenite::Error),
+    PongError(nash_ws::Error),
     #[error("WebSocket connection closed")]
-    ConnectionClosed(Option<CloseFrame>),
+    ConnectionClosed(Option<String>),
     #[error("This error happened because of a different error elsewhere")]
     LibraryError,
     #[error("This library sent a ping, but no pong was received from Pusher")]
@@ -191,9 +183,9 @@ impl PusherClientConnection {
                         {
                             let error = (async || {
                                 let mut subscribed_channels = subscribed_channels.borrow_mut();
-                                let (send_queue_sender, mut receive_queue_receiver) = unbounded_channel();
+                                let (ping_sender, mut ping_receiver) = mpsc::channel(1);
                                 state_tx.send_replace(ConnectionState::Connecting);
-                                let (web_socket, _response) = connect_async(format!(
+                                let (mut write_stream, mut read_stream) = WebSocket::new(&format!(
                                     "wss://ws-{}.pusher.com/app/{}?protocol=7&client=Rust-{}?version={}",
                                     connection.options.cluster_name,
                                     connection.options.key,
@@ -203,7 +195,6 @@ impl PusherClientConnection {
                                 .await
                                 .map_err(PusherClientError::WebSocketError)?;
                                 // Wait until we get the pusher:connection_established event
-                                let (mut write_stream, mut read_stream) = web_socket.split();
                                 let text = loop {
                                     let message = read_stream
                                         .next()
@@ -213,20 +204,20 @@ impl PusherClientConnection {
                                     match message {
                                         Message::Text(text) => break text,
                                         Message::Binary(_) => return Err(PusherClientError::UnexpectedBinaryData),
-                                        Message::Ping(data) => {
-                                            write_stream
-                                                .send(Message::Pong(data))
-                                                .await
-                                                .map_err(PusherClientError::PongError)?;
-                                        }
-                                        Message::Pong(_) => {
-                                            // We never sent a ping, so we shouldn't receive a pong
-                                            return Err(PusherClientError::UnexpectedPong);
-                                        }
+                                        // Message::Ping(data) => {
+                                        //     write_stream
+                                        //         .send(Message::Pong(data))
+                                        //         .await
+                                        //         .map_err(PusherClientError::PongError)?;
+                                        // }
+                                        // Message::Pong(_) => {
+                                        //     // We never sent a ping, so we shouldn't receive a pong
+                                        //     return Err(PusherClientError::UnexpectedPong);
+                                        // }
                                         Message::Close(close_frame) => {
                                             return Err(PusherClientError::ConnectionClosed(close_frame));
                                         }
-                                        Message::Frame(_) => unreachable!(),
+                                        // Message::Frame(_) => unreachable!(),
                                     }
                                 };
                                 let event = serde_json::from_str::<PusherServerEvent>(text.as_str())
@@ -241,7 +232,7 @@ impl PusherClientConnection {
                                 let sender_future = async {
                                     // Re-subscribe to every channel that has a subscription
                                     for (channel, subscription) in subscriptions.lock().await.iter() {
-                                        write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
+                                        write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                             event: "pusher:subscribe".into(),
                                             data: PusherSubscribeEvent {
                                                 channel: channel.clone(),
@@ -257,7 +248,7 @@ impl PusherClientConnection {
                                     loop {
                                         match select(async {
                                             let mut subscribe_actions = Vec::default();
-                                            subscribe_actions_rx.recv_many(&mut subscribe_actions, usize::MAX).await; subscribe_actions }.boxed_local(), receive_queue_receiver.recv().boxed_local()).await {
+                                            subscribe_actions_rx.recv_many(&mut subscribe_actions, usize::MAX).await; subscribe_actions }.boxed_local(), ping_receiver.recv().boxed_local()).await {
                                         Either::Left((subscribe_actions, _)) => {
                                             let mut subscriptions = subscriptions.lock().await;
 
@@ -286,7 +277,7 @@ impl PusherClientConnection {
                                             for subscribed_channel in subscribed_channels.clone() {
                                                 if !subscriptions.contains_key(&subscribed_channel) {
                                                     subscribed_channels.remove(&subscribed_channel);
-                                                    write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
+                                                    write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                                         event: "pusher:unsubscribe".into(),
                                                         data: PusherSubscribeEvent {
                                                             channel: subscribed_channel,
@@ -297,7 +288,7 @@ impl PusherClientConnection {
                                             }
                                             for (channel, subscription) in subscriptions.iter() {
                                                 if !subscribed_channels.contains(channel) {
-                                                    write_stream.send(Message::Text(serde_json::to_string(&PusherClientEvent {
+                                                    write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
                                                         event: "pusher:subscribe".into(),
                                                         data: PusherSubscribeEvent {
                                                             channel: channel.clone(),
@@ -311,9 +302,12 @@ impl PusherClientConnection {
                                                 }
                                             }
                                         },
-                                        Either::Right((message, _)) => {
+                                        Either::Right((_, _)) => {
                                             write_stream
-                                                .send(message.unwrap())
+                                                .send(&Message::Text(serde_json::to_string(&PusherClientEvent {
+                                                    event: "pusher:ping".into(),
+                                                    data: ()
+                                                }).unwrap()))
                                                 .await
                                                 .map_err(PusherClientError::WebSocketError)?;
                                         }
@@ -340,8 +334,8 @@ impl PusherClientConnection {
                                                 }
                                                 Err(_) => {
                                                     // println!("Sending a ping");
-                                                    send_queue_sender
-                                                        .send(Message::Ping(Default::default()))
+                                                    ping_sender
+                                                        .try_send(())
                                                         .map_err(|_| PusherClientError::LibraryError)?;
                                                     let message =
                                                         timeout(connection.options.pong_timeout, read_stream.next())
@@ -369,42 +363,46 @@ impl PusherClientConnection {
                                                         text.as_str(),
                                                     )
                                                     .map_err(PusherClientError::JsonParseError)?;
-                                                if event.event
-                                                    == "pusher_internal:subscription_succeeded"
-                                                {
-                                                    let channel = event.channel.ok_or(PusherClientError::ParseError)?;
-                                                    // println!("Successfully subscribed to {:?}", channel);
-                                                    if let Some(subscription) = subscriptions.lock().await.get(&channel) {
-                                                        for sender in subscription {
-                                                            sender.send(SubscriptionEvent::SuccessfullySubscribed).unwrap();
+                                                match event.event.as_str() {
+                                                    "pusher_internal:subscription_succeeded" => {
+                                                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
+                                                        // println!("Successfully subscribed to {:?}", channel);
+                                                        if let Some(subscription) = subscriptions.lock().await.get(&channel) {
+                                                            for sender in subscription {
+                                                                sender.send(SubscriptionEvent::SuccessfullySubscribed).unwrap();
+                                                            }
                                                         }
-                                                    }
-                                                } else {
-                                                    let channel = event.channel.ok_or(PusherClientError::ParseError)?;
-                                                    // println!("Event on channel: {:?}", channel);
-                                                    if let Some(subscription) = subscriptions.lock().await.get_mut(&channel) {
-                                                        subscription
-                                                            .iter()
-                                                            .for_each(|sender| sender.send(SubscriptionEvent::Event(CustomEventData { event: event.event.clone(), data: event.data.clone() })).unwrap());
+                                                    },
+                                                    "pusher:pong" => {         
+                                                        // println!("Received pong");                                  
+                                                        // We just use pong to know that the connection is still alive
+                                                        // We already updated the last message received
+                                                        // So no need to do anything here
+                                                    },
+                                                    event_name => {
+                                                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
+                                                        // println!("Event on channel: {:?}", channel);
+                                                        if let Some(subscription) = subscriptions.lock().await.get_mut(&channel) {
+                                                            subscription
+                                                                .iter()
+                                                                .for_each(|sender| sender.send(SubscriptionEvent::Event(CustomEventData { event: event_name.to_owned(), data: event.data.to_owned() })).unwrap());
+                                                        }
                                                     }
                                                 }
                                             }
-                                            Message::Ping(data) => {
-                                                // println!("Received ping");
-                                                let _ =
-                                                    send_queue_sender.send(Message::Pong(data));
-                                            }
-                                            Message::Pong(_) => {
-                                                // We just use pong to know that the connection is still alive
-                                                // We already updated the last message received
-                                                // So no need to do anything here
-                                            }
+                                            // Message::Ping(data) => {
+                                            //     // println!("Received ping");
+                                            //     let _ =
+                                            //         send_queue_sender.send(Message::Pong(data));
+                                            // }
+                                            // Message::Pong(_) => {
+                                            // }
                                             Message::Close(close_frame) => {
                                                 Err(PusherClientError::ConnectionClosed(
                                                     close_frame,
                                                 ))?
                                             }
-                                            Message::Frame(_) => unreachable!(),
+                                            // Message::Frame(_) => unreachable!(),
                                         }
                                     }
                                     #[allow(unreachable_code)]
