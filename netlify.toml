@@ -1,0 +1,5 @@
+[build]
+base = "examples/app"
+publish = "dist"
+command = "trunk build"
+environment = { NETLIFY_EXPERIMENTAL_BUILD_RUST_SOURCE = "true" }
