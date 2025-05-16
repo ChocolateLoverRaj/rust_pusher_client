@@ -1,5 +1,5 @@
 [build]
 base = "examples/app"
 publish = "dist"
-command = "cargo binstall trunk && trunk build"
+command = "curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash && cargo binstall trunk && trunk build"
 environment = { NETLIFY_EXPERIMENTAL_BUILD_RUST_SOURCE = "true" }
