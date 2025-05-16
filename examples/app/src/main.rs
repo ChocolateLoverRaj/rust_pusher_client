@@ -7,9 +7,9 @@ use fluvio_wasm_timer::Delay;
 use iced::Task;
 use iced::futures::lock::Mutex;
 use iced::futures::stream::{once, unfold};
-use iced::widget::{button, column, text};
+use iced::widget::{button, column, scrollable, text};
 use iced::{Element, Subscription, Theme};
-use pusher_client::{ConnectionState, Options, PusherClientConnection};
+use pusher_client::{ConnectionState, Options, PusherClientConnection, SubscriptionEvent};
 
 pub fn main() -> iced::Result {
     console_error_panic_hook::set_once();
@@ -22,6 +22,7 @@ pub fn main() -> iced::Result {
 #[derive(Default)]
 struct App {
     connection: Option<PusherClientConnection>,
+    messages: Vec<SubscriptionEvent>,
 }
 
 #[derive(Default)]
@@ -37,6 +38,7 @@ enum Message {
     ConnectionStateChange,
     Disconnect,
     Connect,
+    EventReceived(SubscriptionEvent),
 }
 
 impl App {
@@ -63,6 +65,7 @@ impl App {
                         }),
                         |_| Message::ConnectionStateChange,
                     ),
+                    Task::run(connection.subscribe("my-channel"), Message::EventReceived),
                 ]);
                 self.connection = Some(connection);
                 task
@@ -95,6 +98,10 @@ impl App {
                 self.connection.as_ref().unwrap().disconnect();
                 Task::none()
             }
+            Message::EventReceived(event) => {
+                self.messages.push(event);
+                Task::none()
+            }
         }
     }
 
@@ -103,39 +110,40 @@ impl App {
     }
 
     fn view(&self) -> Element<Message> {
-        let mut elements = Vec::from_iter([text(format!(
-            "Connection status: {:#?}",
-            self.connection
-                .as_ref()
-                .map(|connection| connection.state().borrow())
-                .as_deref()
-        ))
-        .into()]);
+        let mut elements = Vec::default();
         if let Some(connection) = self.connection.as_ref() {
-            match connection.state().borrow().deref() {
-                ConnectionState::Connected(_) => {
-                    elements.push(
-                        button("Disconnect")
-                            .style(button::danger)
-                            .on_press(Message::Disconnect)
-                            .into(),
-                    );
-                }
+            elements.push(match connection.state().borrow().deref() {
+                ConnectionState::Connected(_) => button("Disconnect")
+                    .style(button::danger)
+                    .on_press(Message::Disconnect)
+                    .into(),
                 ConnectionState::Disconnecting => {
-                    elements.push(button("Disconnecting").style(button::danger).into());
+                    button("Disconnecting").style(button::danger).into()
                 }
-                ConnectionState::NotConnected(_) => {
-                    elements.push(
-                        button("Connect")
-                            .style(button::primary)
-                            .on_press(Message::Connect)
-                            .into(),
-                    );
-                }
-                ConnectionState::Connecting => {}
-            }
+                ConnectionState::NotConnected(_) => button("Connect")
+                    .style(button::primary)
+                    .on_press(Message::Connect)
+                    .into(),
+                ConnectionState::Connecting => button("Connecting").style(button::primary).into(),
+            });
         }
-        column(elements).into()
+        elements.push(
+            text(format!(
+                "Connection status: {:#?}",
+                self.connection
+                    .as_ref()
+                    .map(|connection| connection.state().borrow())
+                    .as_deref()
+            ))
+            .into(),
+        );
+        elements.push(text("Messages").into());
+        elements.extend(
+            self.messages
+                .iter()
+                .map(|message| text(format!("{:?}", message)).into()),
+        );
+        scrollable(column(elements)).into()
     }
 
     fn theme(&self) -> Theme {

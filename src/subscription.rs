@@ -5,15 +5,15 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::{PusherClientConnection, SubscribeAction, SubscribeActionType, SubscriptionEvent};
 
-pub struct PusherClientConnectionSubscription<'a> {
-    connection: &'a PusherClientConnection,
+pub struct PusherClientConnectionSubscription {
+    connection: PusherClientConnection,
     channel: String,
     sender: Arc<mpsc::UnboundedSender<SubscriptionEvent>>,
     receiver: UnboundedReceiver<SubscriptionEvent>,
 }
 
-impl<'a> PusherClientConnectionSubscription<'a> {
-    pub(crate) fn new(connection: &'a PusherClientConnection, channel: &str) -> Self {
+impl PusherClientConnectionSubscription {
+    pub(crate) fn new(connection: PusherClientConnection, channel: &str) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let sender = Arc::new(sender);
         connection
@@ -33,7 +33,7 @@ impl<'a> PusherClientConnectionSubscription<'a> {
     }
 }
 
-impl Stream for PusherClientConnectionSubscription<'_> {
+impl Stream for PusherClientConnectionSubscription {
     type Item = SubscriptionEvent;
 
     fn poll_next(
@@ -44,7 +44,7 @@ impl Stream for PusherClientConnectionSubscription<'_> {
     }
 }
 
-impl Drop for PusherClientConnectionSubscription<'_> {
+impl Drop for PusherClientConnectionSubscription {
     fn drop(&mut self) {
         self.connection
             .subscribe_actions

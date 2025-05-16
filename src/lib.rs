@@ -453,6 +453,6 @@ impl PusherClientConnection {
     }
 
     pub fn subscribe(&self, channel: &str) -> PusherClientConnectionSubscription {
-        PusherClientConnectionSubscription::new(self, channel)
+        PusherClientConnectionSubscription::new(self.clone(), channel)
     }
 }
