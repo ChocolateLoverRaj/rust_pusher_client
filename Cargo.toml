@@ -23,9 +23,6 @@ tokio-stream = { version = "0.1.17", default-features = false, features = [
     "sync",
 ] }
 
-[dev-dependencies]
-dotenvy_macro = "0.15.7"
-
 [features]
 std = ["tokio/rt-multi-thread"]
 default = ["std"]

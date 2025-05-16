@@ -104,7 +104,6 @@ name = "app"
 version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
- "dotenvy_macro",
  "fluvio-wasm-timer",
  "iced",
  "pusher_client",
@@ -909,24 +908,6 @@ name = "dlv-list"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0688c2a7f92e427f44895cd63841bff7b29f8d7a1648b9e7e07a4a365b2e1257"
-
-[[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
-name = "dotenvy_macro"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb0235d912a8c749f4e0c9f18ca253b4c28cfefc1d2518096016d6e3230b6424"
-dependencies = [
- "dotenvy",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
 
 [[package]]
 name = "downcast-rs"
@@ -2839,7 +2820,6 @@ checksum = "afbdc74edc00b6f6a218ca6a5364d6226a259d4b8ea1af4a0ea063f27e179f4d"
 name = "pusher_client"
 version = "0.1.0"
 dependencies = [
- "dotenvy_macro",
  "fluvio-wasm-timer",
  "futures-util",
  "iced_futures",

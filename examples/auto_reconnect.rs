@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use dotenvy_macro::dotenv;
 use futures_util::StreamExt;
 use pusher_client::{ConnectionState, Options, PusherClientConnection};
 use tokio::{join, time::sleep};
@@ -9,8 +8,8 @@ use tokio_stream::wrappers::WatchStream;
 #[tokio::main]
 pub async fn main() {
     let (connection_future, connection) = PusherClientConnection::new(Options {
-        cluster_name: dotenv!("PUSHER_CLUSTER_NAME").into(),
-        key: dotenv!("PUSHER_KEY").into(),
+        cluster_name: env!("PUSHER_CLUSTER_NAME").into(),
+        key: env!("PUSHER_KEY").into(),
         activity_timeout: Duration::from_secs(1),
         pong_timeout: Duration::from_secs(5),
     });

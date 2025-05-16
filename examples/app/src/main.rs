@@ -2,7 +2,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dotenvy_macro::dotenv;
 use fluvio_wasm_timer::Delay;
 use iced::Task;
 use iced::futures::lock::Mutex;
@@ -47,8 +46,8 @@ impl App {
         match message {
             Message::Initial => {
                 let (connection_future, connection) = PusherClientConnection::new(Options {
-                    cluster_name: dotenv!("PUSHER_CLUSTER_NAME").into(),
-                    key: dotenv!("PUSHER_KEY").into(),
+                    cluster_name: env!("PUSHER_CLUSTER_NAME").into(),
+                    key: env!("PUSHER_KEY").into(),
                     activity_timeout: Duration::from_secs(1),
                     pong_timeout: Duration::from_secs(5),
                 });
