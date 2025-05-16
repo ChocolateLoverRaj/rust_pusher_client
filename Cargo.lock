@@ -105,6 +105,7 @@ version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
  "dotenvy_macro",
+ "fluvio-wasm-timer",
  "iced",
  "pusher_client",
 ]

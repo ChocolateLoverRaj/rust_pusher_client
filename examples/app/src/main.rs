@@ -1,11 +1,15 @@
+use std::ops::Deref;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dotenvy_macro::dotenv;
+use fluvio_wasm_timer::Delay;
 use iced::Task;
-use iced::futures::stream::once;
+use iced::futures::lock::Mutex;
+use iced::futures::stream::{once, unfold};
 use iced::widget::text;
 use iced::{Element, Subscription, Theme};
-use pusher_client::{Options, PusherClientConnection};
+use pusher_client::{ConnectionState, Options, PusherClientConnection};
 
 pub fn main() -> iced::Result {
     console_error_panic_hook::set_once();
@@ -30,10 +34,13 @@ enum State {
 enum Message {
     Initial,
     Unreachable,
+    ConnectionStateChange,
+    ShouldReconnect,
 }
 
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
+        println!("Message: {:?}", message);
         match message {
             Message::Initial => {
                 let (connection_future, connection) = PusherClientConnection::new(Options {
@@ -43,11 +50,39 @@ impl App {
                     pong_timeout: Duration::from_secs(5),
                 });
                 connection.connect();
+                let task = Task::batch([
+                    Task::run(once(connection_future), |_| Message::Unreachable),
+                    Task::run(
+                        unfold((), {
+                            let receiver = Arc::new(Mutex::new(connection.state().clone()));
+                            move |()| {
+                                let receiver = receiver.clone();
+                                async move { Some(((), receiver.lock().await.changed().await.unwrap())) }
+                            }
+                        }),
+                        |_| Message::ConnectionStateChange,
+                    ),
+                ]);
                 self.connection = Some(connection);
-                Task::run(once(connection_future), |_| Message::Unreachable)
+                task
             }
             Message::Unreachable => {
                 unreachable!()
+            }
+            Message::ConnectionStateChange => {
+                let connection = self.connection.as_ref().unwrap();
+                if let ConnectionState::NotConnected(_) = connection.state().borrow().deref() {
+                    // Do not use up too much CPU from constantly failing
+                    Task::run(once(Delay::new(Duration::from_secs(1))), |_| {
+                        Message::ShouldReconnect
+                    })
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ShouldReconnect => {
+                self.connection.as_ref().unwrap().connect();
+                Task::none()
             }
         }
     }
@@ -57,7 +92,14 @@ impl App {
     }
 
     fn view(&self) -> Element<Message> {
-        text("Hello").size(100).into()
+        text(format!(
+            "Connection status: {:#?}",
+            self.connection
+                .as_ref()
+                .map(|connection| connection.state().borrow())
+                .as_deref()
+        ))
+        .into()
     }
 
     fn theme(&self) -> Theme {
