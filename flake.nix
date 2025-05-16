@@ -37,7 +37,9 @@
             extensions = [ "rust-src" ];
             targets = [ "wasm32-unknown-unknown" ];
           })
+          rust-analyzer
           trunk
+          openssl
         ];
       in
       {
