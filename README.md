@@ -4,7 +4,7 @@ This is a [Pusher *Channels*](https://pusher.com/channels/) *compatible* (so you
 This package will be available as `pusher_client` on crates.io.
 
 ## Goals
-- Implement functionality as it's requested. We'll start with basic subscribing to channels, and then we can do stuff like private, presense, and client events.
+- Implement functionality as it's requested. We'll start with basic subscribing to channels, and then we can do stuff like private, presence, and client events.
 - Be maintained and if needed transition maintainers
 - Not use any `unsafe`
 - Be nice, easy, and Rusty to use
@@ -21,3 +21,10 @@ This package will be available as `pusher_client` on crates.io.
 - [ ] Encrypted channels
 - [ ] Client events
 - [x] Disconnect and reconnect gracefully (on an error, connection lost, or if app wants to disconnect)
+
+## Demo
+You can see a demo of using this crate in a Iced app that works on the web as well as native platforms. It's in `examples/app`. 
+
+The live demo is at https://pusher-rs.netlify.app/, but it uses my Pusher app so you won't be able to create messages. Later I will add the ability to specify the app id so you can test it on your own Pusher compatible url.
+
+To test the app on the web, run `trunk serve`. To test the app natively, run `cargo r`.
