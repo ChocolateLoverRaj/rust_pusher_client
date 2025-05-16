@@ -40,6 +40,8 @@
           rust-analyzer
           trunk
           openssl
+          # For serving the web app built by Trunk
+          http-server
         ];
       in
       {
