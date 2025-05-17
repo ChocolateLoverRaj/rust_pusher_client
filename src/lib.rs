@@ -5,21 +5,65 @@ use std::{
     usize,
 };
 
-use fluvio_wasm_timer::Delay;
-use futures_util::{
-    future::{select, select_all, Either}, FutureExt, StreamExt
-};
-use iced_futures::MaybeSend;
-use nash_ws::{Message, WebSocket};
+use disconnect_handler::disconnect_handler;
+pub use error::PusherClientError;
+use futures_util::{FutureExt, StreamExt, future::BoxFuture};
+use iced_futures::{MaybeSend, MaybeSync};
+use nash_ws::WebSocket;
+use receiver::receiver;
+use sender::sender;
 use serde::{Deserialize, Serialize};
-use subscription::PusherClientConnectionSubscription;
-use thiserror::Error;
+use subscription_handler::subscription_handler;
 use tokio::{
     sync::{Mutex, mpsc, watch},
     try_join,
 };
 use tokio_stream::wrappers::WatchStream;
-pub mod subscription;
+
+mod disconnect_handler;
+mod error;
+mod message_to_send;
+mod receiver;
+mod sender;
+mod subscription;
+mod subscription_handler;
+mod wait_for_connection_established;
+
+pub use subscription::PusherClientConnectionSubscription;
+use wait_for_connection_established::wait_for_connection_established;
+
+pub struct PrivateChannelAuthRequest {
+    pub socket_id: String,
+    pub channel: String,
+}
+
+pub struct PresenceChannelAuthRequest {
+    pub socket_id: String,
+    pub channel: String,
+    pub user_data: String,
+}
+
+pub enum AuthRequest {
+    Private(PrivateChannelAuthRequest),
+    Presence(PresenceChannelAuthRequest),
+}
+
+pub trait AuthProvider: MaybeSend + MaybeSync {
+    fn get_auth_signature(
+        &self,
+        auth_request: AuthRequest,
+    ) -> BoxFuture<Result<String, Box<dyn std::error::Error>>>;
+}
+
+pub struct UnimplementedAuthProvider;
+
+type AuthResult = Result<String, Box<dyn std::error::Error>>;
+
+impl AuthProvider for UnimplementedAuthProvider {
+    fn get_auth_signature(&self, _auth_request: AuthRequest) -> BoxFuture<AuthResult> {
+        async { Err("Authentication not implemented".into()) }.boxed()
+    }
+}
 
 pub struct Options {
     pub cluster_name: String,
@@ -28,6 +72,7 @@ pub struct Options {
     pub activity_timeout: Duration,
     /// Duration after sending a ping after which it is assumed that the connection is disconnected
     pub pong_timeout: Duration,
+    pub auth_provider: Box<dyn AuthProvider>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -50,40 +95,6 @@ struct PusherClientEvent<T> {
     data: Option<T>,
 }
 
-#[derive(Debug)]
-pub struct UnexpectedEventError {
-    pub channel: String,
-    pub event: String,
-}
-
-#[derive(Debug, Error)]
-pub enum PusherClientError {
-    #[error("The WebSocket read stream ended")]
-    StreamEndedBeforeConnectionEstablished,
-    #[error("WebSocket error when reading data")]
-    WebSocketError(nash_ws::Error),
-    #[error("Received binary data from Pusher that was unexpected")]
-    UnexpectedBinaryData,
-    #[error("Received a pong when we shouldn't've received one")]
-    UnexpectedPong,
-    #[error("Received JSON from Pusher in an invalid format")]
-    JsonParseError(serde_json::Error),
-    #[error("Received data from Pusher in an invalid format")]
-    ParseError,
-    #[error("Received an unexpected subscribe succeeded event")]
-    UnexpectedSubscribeSucceededEvent(String),
-    #[error("Received an unexpected custom event")]
-    UnexpectedEvent(UnexpectedEventError),
-    #[error("Error sending a pong after receiving a ping from Pusher")]
-    PongError(nash_ws::Error),
-    #[error("WebSocket connection closed")]
-    ConnectionClosed(Option<String>),
-    #[error("This error happened because of a different error elsewhere")]
-    LibraryError,
-    #[error("This library sent a ping, but no pong was received from Pusher")]
-    PongTimeout,
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct NotConnectedState {
     pub error: Option<Arc<PusherClientError>>,
@@ -94,7 +105,7 @@ pub enum ConnectionState {
     NotConnected(NotConnectedState),
     Connecting,
     Connected(ConnectionInfo),
-    Disconnecting
+    Disconnecting,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,9 +189,9 @@ impl PusherClientConnection {
                         {
                             let error = (async || {
                                 let mut subscribed_channels = subscribed_channels.lock().await;
-                                let (ping_sender, mut ping_receiver) = mpsc::channel::<()>(1);
+                                let (message_tx, message_rx) = mpsc::unbounded_channel();
                                 state_tx.send_replace(ConnectionState::Connecting);
-                                let (mut write_stream, mut read_stream) = WebSocket::new(&format!(
+                                let (write_stream, mut read_stream) = WebSocket::new(&format!(
                                     "wss://ws-{}.pusher.com/app/{}?protocol=7&client=Rust-{}?version={}",
                                     connection.options.cluster_name,
                                     connection.options.key,
@@ -190,232 +201,16 @@ impl PusherClientConnection {
                                 .await
                                 .map_err(PusherClientError::WebSocketError)?;
                                 // Wait until we get the pusher:connection_established event
-                                let text = loop {
-                                    let message = read_stream
-                                        .next()
-                                        .await
-                                        .ok_or(PusherClientError::StreamEndedBeforeConnectionEstablished)?
-                                        .map_err(PusherClientError::WebSocketError)?;
-                                    match message {
-                                        Message::Text(text) => break text,
-                                        Message::Binary(_) => return Err(PusherClientError::UnexpectedBinaryData),
-                                        Message::Close(close_frame) => {
-                                            return Err(PusherClientError::ConnectionClosed(close_frame));
-                                        }
-                                    }
-                                };
-                                let event = serde_json::from_str::<PusherServerEvent>(text.as_str())
-                                    .map_err(PusherClientError::JsonParseError)?;
-                                if event.event != "pusher:connection_established" {
-                                    Err(PusherClientError::ParseError)?;
-                                }
-                                let connection_info = serde_json::from_str::<ConnectionInfo>(&event.data)
-                                    .map_err(PusherClientError::JsonParseError)?;
+                                let connection_info = wait_for_connection_established(&mut read_stream).await?;
                                 let pusher_requested_activity_timeout = Duration::from_secs(connection_info.activity_timeout);
+                                let socket_id = connection_info.socket_id.clone();
                                 state_tx.send_replace(ConnectionState::Connected(connection_info));
-                                let sender_future = async {
-                                    // Re-subscribe to every channel that has a subscription
-                                    for (channel, subscription) in subscriptions.lock().await.iter() {
-                                        write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
-                                            event: "pusher:subscribe".into(),
-                                            data: Some(PusherSubscribeEvent {
-                                                channel: channel.clone(),
-                                            }),
-                                        }).unwrap().into())).await
-                                        .map_err(PusherClientError::WebSocketError)?;
-                                        subscribed_channels.insert(channel.clone());
-                                        for sender in subscription {
-                                            sender.send(SubscriptionEvent::Connecting).unwrap()
-                                        }
-                                    }
-
-                                    loop {
-                                        enum Action {
-                                            Subscribe(Vec<SubscribeAction>),
-                                            Ping,
-                                            Disconnect
-                                        }
-                                        let subscribe_future = Box::pin(async {
-                                            let mut subscribe_actions = Vec::default();
-                                            subscribe_actions_rx.recv_many(&mut subscribe_actions, usize::MAX).await; 
-                                            Action::Subscribe(subscribe_actions) 
-                                        });
-                                        let ping_future = async  {
-                                            ping_receiver.recv().await.unwrap();
-                                            Action::Ping
-                                        }.boxed();
-                                        let disconnect_future = Box::pin(async {
-                                            loop {
-                                                if let Some(ConnectOperation::Disconnect) = connect_queue_rx.next().await.unwrap() {
-                                                    break;
-                                                }
-                                            }
-                                            Action::Disconnect
-                                        });
-                                        let action = select_all([subscribe_future, ping_future, disconnect_future]).await.0;
-                                        match action {
-                                            Action::Subscribe(subscribe_actions) => {
-                                                let mut subscriptions = subscriptions.lock().await;
-
-                                                // Update senders
-                                                for subscribe_action in subscribe_actions {
-                                                    match subscribe_action.action_type {
-                                                        SubscribeActionType::Subscribe => {
-                                                            let subscription = subscriptions.entry(subscribe_action.channel.clone()).or_insert(Default::default());
-                                                            let channel_key = subscription.len();
-                                                            subscription.insert(channel_key, subscribe_action.sender);
-                                                        },
-                                                        SubscribeActionType::Unsubscribe => {
-                                                            let subscription = subscriptions.get_mut(&subscribe_action.channel).unwrap();
-                                                            subscription.swap_remove(subscription
-                                                                .iter()
-                                                                .position(|sender|
-                                                                    Arc::ptr_eq(sender, &subscribe_action.sender)).unwrap());
-                                                            if subscription.is_empty() {
-                                                                subscriptions.remove(&subscribe_action.channel);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                // Actually subscribe / unsubscribe
-                                                for subscribed_channel in subscribed_channels.clone() {
-                                                    if !subscriptions.contains_key(&subscribed_channel) {
-                                                        subscribed_channels.remove(&subscribed_channel);
-                                                        write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
-                                                            event: "pusher:unsubscribe".into(),
-                                                            data: Some(PusherSubscribeEvent {
-                                                                channel: subscribed_channel,
-                                                            }),
-                                                        }).unwrap().into())).await
-                                                        .map_err(PusherClientError::WebSocketError)?;
-                                                    }
-                                                }
-                                                for (channel, subscription) in subscriptions.iter() {
-                                                    if !subscribed_channels.contains(channel) {
-                                                        write_stream.send(&Message::Text(serde_json::to_string(&PusherClientEvent {
-                                                            event: "pusher:subscribe".into(),
-                                                            data: Some(PusherSubscribeEvent {
-                                                                channel: channel.clone(),
-                                                            }),
-                                                        }).unwrap().into())).await
-                                                        .map_err(PusherClientError::WebSocketError)?;
-                                                        subscribed_channels.insert(channel.to_owned());
-                                                        for sender in subscription {
-                                                            sender.send(SubscriptionEvent::Connecting).unwrap();
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            Action::Ping => {
-                                                write_stream
-                                                    .send(&Message::Text(serde_json::to_string(&PusherClientEvent {
-                                                        event: "pusher:ping".into(),
-                                                        data: None::<()>
-                                                    }).unwrap()))
-                                                    .await
-                                                    .map_err(PusherClientError::WebSocketError)?;
-                                            },
-                                            Action::Disconnect => {
-                                                state_tx.send_replace(ConnectionState::Disconnecting);
-                                                write_stream.close(None).await.map_err(PusherClientError::WebSocketError)?;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    #[allow(unreachable_code)]
-                                    Ok::<_, PusherClientError>(())
-                                };
-                                let receiver_future = async {
-                                    let mut last_message_received = fluvio_wasm_timer::Instant::now();
-                                    loop {
-                                        let message = {
-                                            match select(
-                                                Delay::new_at(last_message_received + connection.options.activity_timeout.min(pusher_requested_activity_timeout)),
-                                                Box::pin(read_stream.next()),
-                                            )
-                                            .await
-                                            {
-                                                Either::Right((message, _)) => {
-                                                    if let Some(message) = message {
-                                                        message.map_err(PusherClientError::WebSocketError)?
-                                                    } else {
-                                                        break;
-                                                    }
-                                                }
-                                                Either::Left((_, read_stream_next)) => {
-                                                    // println!("Sending a ping");
-                                                    ping_sender
-                                                        .try_send(())
-                                                        .map_err(|_| PusherClientError::LibraryError)?;
-                                                    let message = match select(Delay::new(connection.options.pong_timeout), read_stream_next)
-                                                            .await {
-                                                        Either::Left(_) => {
-                                                            Err(PusherClientError::PongTimeout)
-                                                        },
-                                                        Either::Right((message, _)) => {
-                                                            if let Some(message) = message {
-                                                                message.map_err(PusherClientError::WebSocketError)
-                                                            } else {
-                                                                break;
-                                                            }
-                                                        }
-                                                    }?;
-                                                            
-                                                    message
-                                                }
-                                            }
-                                        };
-                                        last_message_received = fluvio_wasm_timer::Instant::now();
-                                        match message {
-                                            Message::Binary(_) => {
-                                                Err(PusherClientError::UnexpectedBinaryData)?;
-                                            }
-                                            Message::Text(text) => {
-                                                // println!("Received text");
-                                                let event =
-                                                    serde_json::from_str::<PusherServerEvent>(
-                                                        text.as_str(),
-                                                    )
-                                                    .map_err(PusherClientError::JsonParseError)?;
-                                                match event.event.as_str() {
-                                                    "pusher_internal:subscription_succeeded" => {
-                                                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
-                                                        // println!("Successfully subscribed to {:?}", channel);
-                                                        if let Some(subscription) = subscriptions.lock().await.get(&channel) {
-                                                            for sender in subscription {
-                                                                sender.send(SubscriptionEvent::SuccessfullySubscribed).unwrap();
-                                                            }
-                                                        }
-                                                    },
-                                                    "pusher:pong" => {         
-                                                        // println!("Received pong");                                  
-                                                        // We just use pong to know that the connection is still alive
-                                                        // We already updated the last message received
-                                                        // So no need to do anything here
-                                                    },
-                                                    event_name => {
-                                                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
-                                                        // println!("Event on channel: {:?}", channel);
-                                                        if let Some(subscription) = subscriptions.lock().await.get_mut(&channel) {
-                                                            subscription
-                                                                .iter()
-                                                                .for_each(|sender| sender.send(SubscriptionEvent::Event(CustomEventData { event: event_name.to_owned(), data: event.data.to_owned() })).unwrap());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Message::Close(close_frame) => {
-                                                Err(PusherClientError::ConnectionClosed(
-                                                    close_frame,
-                                                ))?
-                                            }
-                                        }
-                                    }
-                                    #[allow(unreachable_code)]
-                                    Ok::<_, PusherClientError>(())
-                                };
-                                try_join!(sender_future, receiver_future)?;
+                                // let authorization_futures: Mutex<HashMap<String, Box<dyn Future<Output = String> + Send>>> = Default::default();
+                                let sender_future = sender(write_stream, message_rx, state_tx.clone());
+                                let receiver_future = receiver(&connection, pusher_requested_activity_timeout, read_stream, &subscriptions, &message_tx);
+                                let subscriptions_future = subscription_handler(&message_tx, subscriptions.clone(), &mut subscribed_channels, &mut subscribe_actions_rx, &socket_id, &connection.options.auth_provider);
+                                let disconnect_future = disconnect_handler(&mut connect_queue_rx, &message_tx).map(Ok::<_, PusherClientError>);
+                                try_join!(sender_future, receiver_future, subscriptions_future, disconnect_future)?;
                                 Ok::<_, PusherClientError>(())
                             })().await.err();
                             state_tx.send_replace(ConnectionState::NotConnected(

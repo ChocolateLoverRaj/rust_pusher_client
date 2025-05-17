@@ -14,8 +14,10 @@ pub async fn main() {
         auth_provider: Box::new(UnimplementedAuthProvider),
     });
     connection.connect();
-    let event_printer = connection.subscribe("my-channel").for_each(async |event| {
-        println!("{:?}", event);
-    });
+    let event_printer = connection
+        .subscribe("private-channel")
+        .for_each(async |event| {
+            println!("{:?}", event);
+        });
     join!(connection_future, event_printer);
 }

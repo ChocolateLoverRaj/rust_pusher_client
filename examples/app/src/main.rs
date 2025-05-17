@@ -8,7 +8,9 @@ use iced::futures::lock::Mutex;
 use iced::futures::stream::{once, unfold};
 use iced::widget::{button, column, scrollable, text};
 use iced::{Element, Subscription, Theme};
-use pusher_client::{ConnectionState, Options, PusherClientConnection, SubscriptionEvent};
+use pusher_client::{
+    ConnectionState, Options, PusherClientConnection, SubscriptionEvent, UnimplementedAuthProvider,
+};
 
 pub fn main() -> iced::Result {
     console_error_panic_hook::set_once();
@@ -50,6 +52,7 @@ impl App {
                     key: env!("PUSHER_KEY").into(),
                     activity_timeout: Duration::from_secs(1),
                     pong_timeout: Duration::from_secs(5),
+                    auth_provider: Box::new(UnimplementedAuthProvider),
                 });
                 connection.connect();
                 let task = Task::batch([

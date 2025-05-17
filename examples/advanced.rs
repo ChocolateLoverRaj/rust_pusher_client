@@ -1,7 +1,9 @@
 use std::{ops::Deref, time::Duration};
 
 use futures_util::StreamExt;
-use pusher_client::{ConnectionState, Options, PusherClientConnection, SubscriptionEvent};
+use pusher_client::{
+    ConnectionState, Options, PusherClientConnection, SubscriptionEvent, UnimplementedAuthProvider,
+};
 use tokio::{
     join,
     time::{sleep, timeout},
@@ -15,6 +17,7 @@ pub async fn main() {
         key: env!("PUSHER_KEY").into(),
         activity_timeout: Duration::from_secs(1),
         pong_timeout: Duration::from_secs(5),
+        auth_provider: Box::new(UnimplementedAuthProvider),
     });
 
     let subscribe_and_print = async |channel: &str, limit: Option<usize>| {

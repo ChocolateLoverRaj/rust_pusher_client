@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use pusher_client::{ConnectionState, Options, PusherClientConnection};
+use pusher_client::{ConnectionState, Options, PusherClientConnection, UnimplementedAuthProvider};
 use tokio::{join, time::sleep};
 use tokio_stream::wrappers::WatchStream;
 
@@ -12,6 +12,7 @@ pub async fn main() {
         key: env!("PUSHER_KEY").into(),
         activity_timeout: Duration::from_secs(1),
         pong_timeout: Duration::from_secs(5),
+        auth_provider: Box::new(UnimplementedAuthProvider),
     });
     let event_printer = connection.subscribe("my-channel").for_each(async |event| {
         println!("{:?}", event);
