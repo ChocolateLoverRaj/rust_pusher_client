@@ -13,9 +13,11 @@ pub async fn main() {
         pong_timeout: Duration::from_secs(5),
         auth_provider: Box::new(UnimplementedAuthProvider),
     });
-    let event_printer = connection.subscribe("my-channel").for_each(async |event| {
-        println!("{:?}", event);
-    });
+    let event_printer = connection
+        .subscribe("my-channel", pusher_client::ChannelSubscribe::Normal)
+        .for_each(async |event| {
+            println!("{:?}", event);
+        });
     let connect_future = async {
         // This demonstrates how you can disconnect the connection without having to explicitly re-subscribe to all the channels that you subscribed to
         loop {

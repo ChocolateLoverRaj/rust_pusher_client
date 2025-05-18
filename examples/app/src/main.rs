@@ -67,7 +67,10 @@ impl App {
                         }),
                         |_| Message::ConnectionStateChange,
                     ),
-                    Task::run(connection.subscribe("my-channel"), Message::EventReceived),
+                    Task::run(
+                        connection.subscribe("my-channel", pusher_client::ChannelSubscribe::Normal),
+                        Message::EventReceived,
+                    ),
                 ]);
                 self.connection = Some(connection);
                 task

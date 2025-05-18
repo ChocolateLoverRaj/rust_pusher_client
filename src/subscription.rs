@@ -3,7 +3,10 @@ use std::sync::Arc;
 use futures_util::Stream;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use crate::{PusherClientConnection, SubscribeAction, SubscribeActionType, SubscriptionEvent};
+use crate::{
+    ChannelSubscribe, PusherClientConnection, SubscribeAction, SubscribeActionData,
+    SubscribeActionType, SubscriptionEvent,
+};
 
 pub struct PusherClientConnectionSubscription {
     connection: PusherClientConnection,
@@ -13,20 +16,26 @@ pub struct PusherClientConnectionSubscription {
 }
 
 impl PusherClientConnectionSubscription {
-    pub(crate) fn new(connection: PusherClientConnection, channel: &str) -> Self {
+    pub(crate) fn new(
+        connection: PusherClientConnection,
+        channel: &str,
+        channel_type: ChannelSubscribe,
+    ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let sender = Arc::new(sender);
         connection
             .subscribe_actions
             .send(SubscribeAction {
-                action_type: SubscribeActionType::Subscribe,
-                channel: channel.to_owned(),
+                action: SubscribeActionData {
+                    channel: channel.to_owned(),
+                    action_type: SubscribeActionType::Subscribe(channel_type),
+                },
                 sender: sender.clone(),
             })
             .unwrap();
         Self {
             connection,
-            channel: channel.into(),
+            channel: channel.to_owned(),
             receiver,
             sender,
         }
@@ -49,8 +58,10 @@ impl Drop for PusherClientConnectionSubscription {
         self.connection
             .subscribe_actions
             .send(SubscribeAction {
-                action_type: SubscribeActionType::Unsubscribe,
-                channel: self.channel.clone(),
+                action: SubscribeActionData {
+                    channel: self.channel.clone(),
+                    action_type: SubscribeActionType::Unsubscribe,
+                },
                 sender: self.sender.clone(),
             })
             .unwrap();

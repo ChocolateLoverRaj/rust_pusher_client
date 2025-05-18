@@ -14,9 +14,11 @@ pub async fn main() {
         pong_timeout: Duration::from_secs(5),
         auth_provider: Box::new(UnimplementedAuthProvider),
     });
-    let event_printer = connection.subscribe("my-channel").for_each(async |event| {
-        println!("{:?}", event);
-    });
+    let event_printer = connection
+        .subscribe("my-channel", pusher_client::ChannelSubscribe::Normal)
+        .for_each(async |event| {
+            println!("{:?}", event);
+        });
     let reconnect_future = async {
         connection.connect();
         WatchStream::new(connection.state().clone())

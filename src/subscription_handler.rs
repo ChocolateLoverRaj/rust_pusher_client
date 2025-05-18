@@ -3,46 +3,26 @@ use std::{collections::HashSet, sync::Arc};
 use tokio::sync::mpsc;
 
 use crate::{
-    AuthProvider, AuthRequest, PrivateChannelAuthRequest, PusherClientError, SubscribeAction,
-    SubscribeActionType, SubscriptionEvent, Subscriptions,
-    message_to_send::{MessageToSend, SubscribeMessage, SubscribeNormalChannel},
+    PusherClientError, SubscribeAction, SubscribeActionData, SubscribeActionType, Subscription,
+    SubscriptionEvent, Subscriptions,
 };
 
 pub async fn subscription_handler(
-    message_tx: &mpsc::UnboundedSender<MessageToSend>,
+    auth_tx: &mpsc::UnboundedSender<SubscribeActionData>,
     subscriptions: Subscriptions,
     subscribed_channels: &mut HashSet<String>,
     subscribe_actions_rx: &mut mpsc::UnboundedReceiver<SubscribeAction>,
-    socket_id: &str,
-    auth_provider: &Box<dyn AuthProvider>,
 ) -> Result<(), PusherClientError> {
-    let subscribe = |channel: String| {
-        let is_private = channel.starts_with("private-");
-        let is_presence = channel.starts_with("presence-");
-        if is_private || is_presence {
-            let auth_request = if is_private {
-                AuthRequest::Private(PrivateChannelAuthRequest {
-                    channel,
-                    socket_id: socket_id.to_owned(),
-                })
-            } else {
-                todo!("Presence authentication")
-            };
-            auth_provider.get_auth_signature(auth_request);
-        } else {
-            message_tx
-                .send(MessageToSend::Subscribe(SubscribeMessage::Normal(
-                    SubscribeNormalChannel { channel },
-                )))
-                .unwrap();
-        }
-    };
-
     // Re-subscribe to every channel that has a subscription
     for (channel, subscription) in subscriptions.lock().await.iter() {
-        subscribe(channel.to_owned());
+        auth_tx
+            .send(SubscribeActionData {
+                channel: channel.clone(),
+                action_type: SubscribeActionType::Subscribe(subscription.data.clone()),
+            })
+            .unwrap();
         subscribed_channels.insert(channel.clone());
-        for sender in subscription {
+        for sender in &subscription.senders {
             let _ = sender.send(SubscriptionEvent::Connecting);
         }
     }
@@ -58,24 +38,29 @@ pub async fn subscription_handler(
         let mut subscriptions = subscriptions.lock().await;
         // Update senders
         for subscribe_action in subscribe_actions {
-            match subscribe_action.action_type {
-                SubscribeActionType::Subscribe => {
+            match subscribe_action.action.action_type {
+                SubscribeActionType::Subscribe(channel_subscribe) => {
                     let subscription = subscriptions
-                        .entry(subscribe_action.channel.clone())
-                        .or_insert(Default::default());
-                    let channel_key = subscription.len();
-                    subscription.insert(channel_key, subscribe_action.sender);
+                        .entry(subscribe_action.action.channel.clone())
+                        .or_insert(Subscription {
+                            data: channel_subscribe,
+                            senders: Default::default(),
+                        });
+                    subscription.senders.push(subscribe_action.sender);
                 }
                 SubscribeActionType::Unsubscribe => {
-                    let subscription = subscriptions.get_mut(&subscribe_action.channel).unwrap();
-                    subscription.swap_remove(
+                    let subscription = subscriptions
+                        .get_mut(&subscribe_action.action.channel)
+                        .unwrap();
+                    subscription.senders.swap_remove(
                         subscription
+                            .senders
                             .iter()
                             .position(|sender| Arc::ptr_eq(sender, &subscribe_action.sender))
                             .unwrap(),
                     );
-                    if subscription.is_empty() {
-                        subscriptions.remove(&subscribe_action.channel);
+                    if subscription.senders.is_empty() {
+                        subscriptions.remove(&subscribe_action.action.channel);
                     }
                 }
             }
@@ -85,16 +70,24 @@ pub async fn subscription_handler(
         for subscribed_channel in subscribed_channels.clone() {
             if !subscriptions.contains_key(&subscribed_channel) {
                 subscribed_channels.remove(&subscribed_channel);
-                message_tx
-                    .send(MessageToSend::Unsubscribe(subscribed_channel))
+                auth_tx
+                    .send(SubscribeActionData {
+                        channel: subscribed_channel,
+                        action_type: SubscribeActionType::Unsubscribe,
+                    })
                     .unwrap();
             }
         }
         for (channel, subscription) in subscriptions.iter() {
             if !subscribed_channels.contains(channel) {
-                subscribe(channel.to_owned());
+                auth_tx
+                    .send(SubscribeActionData {
+                        channel: channel.clone(),
+                        action_type: SubscribeActionType::Subscribe(subscription.data.clone()),
+                    })
+                    .unwrap();
                 subscribed_channels.insert(channel.to_owned());
-                for sender in subscription {
+                for sender in &subscription.senders {
                     sender.send(SubscriptionEvent::Connecting).unwrap();
                 }
             }

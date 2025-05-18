@@ -44,6 +44,7 @@ pub async fn sender(
                                 })
                             }
                             SubscribeMessage::Presence(subscribe) => {
+                                println!("Sending subscribe with data: {:?}", subscribe);
                                 serde_json::to_string(&PusherClientEvent {
                                     event: "pusher:subscribe".to_owned(),
                                     data: Some(subscribe),

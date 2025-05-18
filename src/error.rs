@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+pub type AuthError = Box<dyn std::error::Error + Send + Sync>;
+
 #[derive(Debug)]
 pub struct UnexpectedEventError {
     pub channel: String,
@@ -32,4 +34,6 @@ pub enum PusherClientError {
     LibraryError,
     #[error("This library sent a ping, but no pong was received from Pusher")]
     PongTimeout,
+    #[error("The authentication provider had an error when providing authentication")]
+    AuthError(AuthError),
 }

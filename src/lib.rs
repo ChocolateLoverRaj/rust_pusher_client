@@ -6,13 +6,18 @@ use std::{
 };
 
 use disconnect_handler::disconnect_handler;
+pub use error::AuthError;
 pub use error::PusherClientError;
 use futures_util::{FutureExt, StreamExt, future::BoxFuture};
 use iced_futures::{MaybeSend, MaybeSync};
+use manage_auth::manage_auth;
 use nash_ws::WebSocket;
+pub use presence_user_data::PresenceUserData;
+pub use private_key_auth_provider::PrivateKeyAuthProvider;
 use receiver::receiver;
 use sender::sender;
 use serde::{Deserialize, Serialize};
+pub use subscription::PusherClientConnectionSubscription;
 use subscription_handler::subscription_handler;
 use tokio::{
     sync::{Mutex, mpsc, watch},
@@ -22,14 +27,16 @@ use tokio_stream::wrappers::WatchStream;
 
 mod disconnect_handler;
 mod error;
+mod manage_auth;
 mod message_to_send;
+mod presence_user_data;
+mod private_key_auth_provider;
 mod receiver;
 mod sender;
 mod subscription;
 mod subscription_handler;
 mod wait_for_connection_established;
 
-pub use subscription::PusherClientConnectionSubscription;
 use wait_for_connection_established::wait_for_connection_established;
 
 pub struct PrivateChannelAuthRequest {
@@ -40,7 +47,7 @@ pub struct PrivateChannelAuthRequest {
 pub struct PresenceChannelAuthRequest {
     pub socket_id: String,
     pub channel: String,
-    pub user_data: String,
+    pub user_data: PresenceUserData,
 }
 
 pub enum AuthRequest {
@@ -49,15 +56,12 @@ pub enum AuthRequest {
 }
 
 pub trait AuthProvider: MaybeSend + MaybeSync {
-    fn get_auth_signature(
-        &self,
-        auth_request: AuthRequest,
-    ) -> BoxFuture<Result<String, Box<dyn std::error::Error>>>;
+    fn get_auth_signature(&self, auth_request: AuthRequest) -> BoxFuture<AuthResult>;
 }
 
 pub struct UnimplementedAuthProvider;
 
-type AuthResult = Result<String, Box<dyn std::error::Error>>;
+type AuthResult = Result<String, AuthError>;
 
 impl AuthProvider for UnimplementedAuthProvider {
     fn get_auth_signature(&self, _auth_request: AuthRequest) -> BoxFuture<AuthResult> {
@@ -133,18 +137,34 @@ enum ConnectOperation {
     Disconnect,
 }
 
-enum SubscribeActionType {
-    Subscribe,
+#[derive(Debug, Clone)]
+pub enum ChannelSubscribe {
+    Normal,
+    Private,
+    Presence(PresenceUserData),
+}
+
+#[derive(Debug, Clone)]
+pub enum SubscribeActionType {
+    Subscribe(ChannelSubscribe),
     Unsubscribe,
 }
 
+#[derive(Debug, Clone)]
+pub struct SubscribeActionData {
+    pub channel: String,
+    pub action_type: SubscribeActionType,
+}
+
 struct SubscribeAction {
-    action_type: SubscribeActionType,
-    channel: String,
+    action: SubscribeActionData,
     sender: Arc<mpsc::UnboundedSender<SubscriptionEvent>>,
 }
 
-type Subscription = Vec<Arc<mpsc::UnboundedSender<SubscriptionEvent>>>;
+struct Subscription {
+    data: ChannelSubscribe,
+    senders: Vec<Arc<mpsc::UnboundedSender<SubscriptionEvent>>>,
+}
 
 type Subscriptions = Arc<Mutex<HashMap<String, Subscription>>>;
 
@@ -205,12 +225,13 @@ impl PusherClientConnection {
                                 let pusher_requested_activity_timeout = Duration::from_secs(connection_info.activity_timeout);
                                 let socket_id = connection_info.socket_id.clone();
                                 state_tx.send_replace(ConnectionState::Connected(connection_info));
-                                // let authorization_futures: Mutex<HashMap<String, Box<dyn Future<Output = String> + Send>>> = Default::default();
+                                let (auth_tx, auth_rx) = mpsc::unbounded_channel();
                                 let sender_future = sender(write_stream, message_rx, state_tx.clone());
                                 let receiver_future = receiver(&connection, pusher_requested_activity_timeout, read_stream, &subscriptions, &message_tx);
-                                let subscriptions_future = subscription_handler(&message_tx, subscriptions.clone(), &mut subscribed_channels, &mut subscribe_actions_rx, &socket_id, &connection.options.auth_provider);
+                                let subscriptions_future = subscription_handler(&auth_tx, subscriptions.clone(), &mut subscribed_channels, &mut subscribe_actions_rx);
                                 let disconnect_future = disconnect_handler(&mut connect_queue_rx, &message_tx).map(Ok::<_, PusherClientError>);
-                                try_join!(sender_future, receiver_future, subscriptions_future, disconnect_future)?;
+                                let manage_auth_future = manage_auth(auth_rx, &message_tx, &socket_id, &connection.options.auth_provider);
+                                try_join!(sender_future, receiver_future, subscriptions_future, disconnect_future, manage_auth_future)?;
                                 Ok::<_, PusherClientError>(())
                             })().await.err();
                             state_tx.send_replace(ConnectionState::NotConnected(
@@ -219,8 +240,12 @@ impl PusherClientConnection {
                                 },
                             ));
                             for subscribed_channel in subscribed_channels.get_mut().drain() {
-                                for sender in
-                                    subscriptions.lock().await.get(&subscribed_channel).unwrap()
+                                for sender in &subscriptions
+                                    .lock()
+                                    .await
+                                    .get(&subscribed_channel)
+                                    .unwrap()
+                                    .senders
                                 {
                                     sender.send(SubscriptionEvent::Disconnected).unwrap();
                                 }
@@ -247,7 +272,11 @@ impl PusherClientConnection {
             .send_replace(Some(ConnectOperation::Disconnect));
     }
 
-    pub fn subscribe(&self, channel: &str) -> PusherClientConnectionSubscription {
-        PusherClientConnectionSubscription::new(self.clone(), channel)
+    pub fn subscribe(
+        &self,
+        channel: &str,
+        channel_type: ChannelSubscribe,
+    ) -> PusherClientConnectionSubscription {
+        PusherClientConnectionSubscription::new(self.clone(), channel, channel_type)
     }
 }

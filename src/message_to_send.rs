@@ -15,6 +15,7 @@ pub struct SubscribePrivateChannel {
 pub struct SubscribePresenceChannel {
     pub channel: String,
     pub auth: String,
+    /// Note that this has to be a serialized string of `PresenceUserData`
     pub channel_data: String,
 }
 

@@ -77,7 +77,7 @@ pub async fn receiver(
                         // println!("Successfully subscribed to {:?}", channel);
                         if let Some(subscription) = subscriptions.lock().await.get(&channel) {
                             // println!("Senders: {}", subscription.len());
-                            for sender in subscription {
+                            for sender in &subscription.senders {
                                 sender
                                     .send(SubscriptionEvent::SuccessfullySubscribed)
                                     .unwrap();
@@ -94,7 +94,7 @@ pub async fn receiver(
                         let channel = event.channel.ok_or(PusherClientError::ParseError)?;
                         // println!("Event on channel: {:?}", channel);
                         if let Some(subscription) = subscriptions.lock().await.get_mut(&channel) {
-                            subscription.iter().for_each(|sender| {
+                            subscription.senders.iter().for_each(|sender| {
                                 sender
                                     .send(SubscriptionEvent::Event(CustomEventData {
                                         event: event_name.to_owned(),

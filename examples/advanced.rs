@@ -2,7 +2,8 @@ use std::{ops::Deref, time::Duration};
 
 use futures_util::StreamExt;
 use pusher_client::{
-    ConnectionState, Options, PusherClientConnection, SubscriptionEvent, UnimplementedAuthProvider,
+    ChannelSubscribe, ConnectionState, Options, PusherClientConnection, SubscriptionEvent,
+    UnimplementedAuthProvider,
 };
 use tokio::{
     join,
@@ -22,7 +23,7 @@ pub async fn main() {
 
     let subscribe_and_print = async |channel: &str, limit: Option<usize>| {
         println!("Subscribing to channel: {}", channel);
-        let mut subscription = connection.subscribe(channel);
+        let mut subscription = connection.subscribe(channel, ChannelSubscribe::Normal);
         let mut count = 0;
         loop {
             if let Some(limit) = limit {
@@ -50,7 +51,7 @@ pub async fn main() {
             println!("Receiving events on {} for {:?}", channel, duration);
             let _ = timeout(duration, async {
                 connection
-                    .subscribe(channel)
+                    .subscribe(channel, ChannelSubscribe::Normal)
                     .for_each(async |event| {
                         println!("{}: {:?}", channel, event);
                     })

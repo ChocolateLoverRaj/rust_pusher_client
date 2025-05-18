@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use pusher_client::{Options, PrivateKeyAuthProvider, PusherClientConnection};
+use pusher_client::{Options, PresenceUserData, PrivateKeyAuthProvider, PusherClientConnection};
+use rand::random;
+use serde_json::{Number, json};
 use tokio::join;
 
 #[tokio::main]
@@ -18,7 +20,21 @@ pub async fn main() {
     });
     connection.connect();
     let event_printer = connection
-        .subscribe("private-channel", pusher_client::ChannelSubscribe::Private)
+        .subscribe(
+            "presence-channel",
+            pusher_client::ChannelSubscribe::Presence(PresenceUserData::new(
+                Number::from_u128(random::<u64>().into()).unwrap(),
+                json!({
+                    "language": "Rust",
+                    "package_name": env!("CARGO_PKG_NAME"),
+                    "package_version": env!("CARGO_PKG_VERSION"),
+                    "package_description": env!("CARGO_PKG_DESCRIPTION"),
+                })
+                .as_object()
+                .unwrap()
+                .to_owned(),
+            )),
+        )
         .for_each(async |event| {
             println!("{:?}", event);
         });
