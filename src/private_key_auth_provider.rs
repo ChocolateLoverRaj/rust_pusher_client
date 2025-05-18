@@ -4,6 +4,9 @@ use sha2::Sha256;
 
 use crate::{AuthProvider, AuthRequest, PresenceChannelAuthRequest, PrivateChannelAuthRequest};
 
+/// Provides synchronous authentication by directly using the app key and secret.
+///
+/// Note that the app key and app secret are secrets and should not be publicly accessible.
 pub struct PrivateKeyAuthProvider {
     pub app_key: String,
     pub app_secret: String,
@@ -28,7 +31,7 @@ impl AuthProvider for PrivateKeyAuthProvider {
                 format!("{}:{}:{}", socket_id, channel, user_data)
             }
         };
-        println!("Signing string: {:?}", string_to_sign);
+        // println!("Signing string: {:?}", string_to_sign);
         mac.update(string_to_sign.as_bytes());
         let signature = hex::encode(mac.finalize().into_bytes());
         let auth = format!("{}:{}", self.app_key, signature);

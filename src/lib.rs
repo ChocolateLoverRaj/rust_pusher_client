@@ -124,11 +124,18 @@ pub struct CustomEventData {
 }
 
 #[derive(Debug, Clone)]
+pub enum PresenceEvent {
+    MemberAdded(PresenceUserData),
+    MemberRemoved(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum SubscriptionEvent {
     Connecting,
-    SuccessfullySubscribed,
     Disconnected,
     Event(CustomEventData),
+    SuccessfullySubscribed(Option<Vec<String>>),
+    PresenceEvent(PresenceEvent),
 }
 
 #[derive(Debug, Clone, Copy)]

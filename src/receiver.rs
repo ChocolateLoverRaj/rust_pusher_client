@@ -3,10 +3,12 @@ use std::time::Duration;
 use fluvio_wasm_timer::Delay;
 use futures_util::future::{Either, select};
 use nash_ws::Message;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    CustomEventData, PusherClientConnection, PusherClientError, PusherServerEvent,
+    CustomEventData, PresenceEvent, PusherClientConnection, PusherClientError, PusherServerEvent,
     SubscriptionEvent, Subscriptions, message_to_send::MessageToSend,
 };
 
@@ -72,23 +74,71 @@ pub async fn receiver(
                 let event = serde_json::from_str::<PusherServerEvent>(text.as_str())
                     .map_err(PusherClientError::JsonParseError)?;
                 match event.event.as_str() {
-                    "pusher_internal:subscription_succeeded" => {
-                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
-                        // println!("Successfully subscribed to {:?}", channel);
-                        if let Some(subscription) = subscriptions.lock().await.get(&channel) {
-                            // println!("Senders: {}", subscription.len());
-                            for sender in &subscription.senders {
-                                sender
-                                    .send(SubscriptionEvent::SuccessfullySubscribed)
-                                    .unwrap();
-                            }
-                        }
-                    }
                     "pusher:pong" => {
                         // println!("Received pong");
                         // We just use pong to know that the connection is still alive
                         // We already updated the last message received
                         // So no need to do anything here
+                    }
+                    "pusher_internal:subscription_succeeded" => {
+                        // println!("Event: {:#?}", event);
+                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
+                        // println!("Successfully subscribed to {:?}", channel);
+                        if let Some(subscription) = subscriptions.lock().await.get(&channel) {
+                            #[derive(Debug, Serialize, Deserialize)]
+                            struct PresenceData {
+                                ids: Vec<String>,
+                            }
+                            #[derive(Debug, Serialize, Deserialize)]
+                            struct PresenceSubscriptionSucceeded {
+                                presence: PresenceData,
+                            }
+                            let ids =
+                                serde_json::from_str::<PresenceSubscriptionSucceeded>(&event.data)
+                                    .ok()
+                                    .map(|s| s.presence.ids);
+                            for sender in &subscription.senders {
+                                sender
+                                    .send(SubscriptionEvent::SuccessfullySubscribed(ids.clone()))
+                                    .unwrap();
+                            }
+                        }
+                    }
+                    "pusher_internal:member_added" => {
+                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
+                        // println!("Member event: {:#?}", event.data);
+                        if let Some(subscription) = subscriptions.lock().await.get(&channel) {
+                            let user_data = serde_json::from_str::<Map<String, Value>>(&event.data)
+                                .map_err(PusherClientError::JsonParseError)?
+                                .try_into()
+                                .map_err(PusherClientError::MemberParseError)?;
+                            let message = SubscriptionEvent::PresenceEvent(
+                                PresenceEvent::MemberAdded(user_data),
+                            );
+                            for sender in &subscription.senders {
+                                sender.send(message.clone()).unwrap();
+                            }
+                        }
+                    }
+                    "pusher_internal:member_removed" => {
+                        let channel = event.channel.ok_or(PusherClientError::ParseError)?;
+                        // println!("Member event: {:#?}", event.data);
+                        if let Some(subscription) = subscriptions.lock().await.get(&channel) {
+                            #[derive(Debug, Serialize, Deserialize)]
+                            struct MemberRemovedEventData {
+                                user_id: String,
+                            }
+                            let user_id =
+                                serde_json::from_str::<MemberRemovedEventData>(&event.data)
+                                    .map_err(PusherClientError::JsonParseError)?
+                                    .user_id;
+                            let message = SubscriptionEvent::PresenceEvent(
+                                PresenceEvent::MemberRemoved(user_id),
+                            );
+                            for sender in &subscription.senders {
+                                sender.send(message.clone()).unwrap();
+                            }
+                        }
                     }
                     event_name => {
                         let channel = event.channel.ok_or(PusherClientError::ParseError)?;

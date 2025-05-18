@@ -3,11 +3,15 @@
     "words": [
         "dotenv",
         "dotenvy_macro",
+        "fluvio",
+        "hmac",
         "nixos",
         "nixpkgs",
         "numtide",
         "oxalica",
         "pkgs",
+        "serde",
+        "soketi",
         "thiserror",
         "tungstenite"
     ]

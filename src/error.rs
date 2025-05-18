@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::presence_user_data::FromMapError;
+
 pub type AuthError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
@@ -36,4 +38,6 @@ pub enum PusherClientError {
     PongTimeout,
     #[error("The authentication provider had an error when providing authentication")]
     AuthError(AuthError),
+    #[error("Unexpected data from a member event")]
+    MemberParseError(FromMapError),
 }
